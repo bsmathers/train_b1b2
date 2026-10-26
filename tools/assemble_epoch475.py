@@ -23,16 +23,25 @@ def sha256(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        help="Checkpoint root; defaults to <repo-root>/checkpoints",
+    )
     args = parser.parse_args()
     root = args.repo_root.resolve()
+    output_root = (
+        args.output_root.resolve()
+        if args.output_root is not None
+        else root / "checkpoints"
+    )
     shard_dir = root / "artifacts" / "epoch475"
     shards = sorted(shard_dir.glob("policy_epoch_475.pt.part-*"))
     if not shards:
         raise FileNotFoundError(f"no Epoch475 shards found in {shard_dir}")
 
     target = (
-        root
-        / "checkpoints"
+        output_root
         / "mediumg1online"
         / "ckpts"
         / "policy_weights"

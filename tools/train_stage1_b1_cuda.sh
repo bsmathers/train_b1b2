@@ -85,7 +85,9 @@ print("AMAGO FlashAttention training smoke test succeeded")
 PY
 
 if [ ! -f "${TAUROSV1_SAVE_DIR}/mediumg1online/ckpts/policy_weights/policy_epoch_475.pt" ]; then
-    "${PYTHON_BIN}" "${ROOT_DIR}/tools/assemble_epoch475.py" --repo-root "${ROOT_DIR}"
+    "${PYTHON_BIN}" "${ROOT_DIR}/tools/assemble_epoch475.py" \
+        --repo-root "${ROOT_DIR}" \
+        --output-root "${TAUROSV1_SAVE_DIR}"
 fi
 
 echo "Preparing bounded pac-tauros subset first (${PAC_TAUROS_TRAJECTORIES} trajectories)"
