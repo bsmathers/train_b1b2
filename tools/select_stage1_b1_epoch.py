@@ -163,7 +163,6 @@ def ranked_completed(rows):
     )
 
 
-
 def native_log_tail(path: Path, max_bytes: int = 16_384, max_lines: int = 80) -> str:
     """Return the relevant end of a failed native worker log without loading it all.
 
