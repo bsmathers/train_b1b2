@@ -88,6 +88,29 @@ The evaluator sets:
 One can explicitly set a strict variable to `0` to debug legacy behavior,
 but **such results must not be used for checkpoint selection**.
 
+## Gen 1 forced and limited move decisions
+
+The upstream `@pkmn/engine` (`showdown=true`) returns exactly
+`Choice.move(1)` during an **automatic** Hyper Beam recharge or a
+locked Rage / Thrash / charge continuation. The native battle does not
+permit switching or freely choosing any of the Pokémon's four moves
+on those turns.
+
+The native host now derives each private request's disabled move flags
+from `battle.choices(side, result)` rather than from static PP alone.
+On automatic turns it reports Metamon's existing `recharge` or `fight`
+pseudo-move, marks switching trapped, and makes the actor's **only legal
+action index 0**. The request/action adapter then maps that pseudo move to
+the engine's sole `Choice.move(1)` without guessing. Bide / Bind / Wrap
+and Disable also mask moves that native Zig disallows. Native Struggle
+(`Choice.move(0)`) is represented by Metamon's `struggle` pseudo-move;
+switches remain legal when Zig allows them.
+
+The canonical actor action is one of the ordinary Metamon indices
+(0–12). A locked automatic turn consumes the canonical index 0 in
+RL2 history, not an arbitrary move sample. The strict adapter continues
+to reject other mismatches.
+
 ## Training versus evaluation
 
 `tools/train_stage1_b1_cuda.sh` invokes `metamon.rl.finetune` and
@@ -111,6 +134,9 @@ Run these from the repository root:
 node --test tests/test_native_choice.cjs
 ./tools/setup_pkmn_engine.sh
 node tests/native_sim_integration.cjs
+node --test tests/test_native_locked_moves.cjs
+python3 -m unittest discover -s tests -p 'test_native_legal.py' -v
+node tests/native_forced_integration.cjs
 python3 -m unittest discover -s tests -p 'test_stage1_selection.py' -v
 python3 -m unittest discover -s tests -p 'test_native_setup.py' -v
 ```
