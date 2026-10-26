@@ -46,6 +46,31 @@ const sets = roster.map(([species, moves]) => ({
   const choice = (side, command) => resolveNativeChoice(
     command, battle.choices(side, res), battle.side(side), engine.Choice
   );
+  // Exhaustively round-trip every *actually legal* Zig choice through the
+  // Showdown interface, on both physical player sides and after switches.
+  function assertChoiceParity(sideId) {
+    const side = battle.side(sideId);
+    const legal = battle.choices(sideId, res);
+    const mons = Array.from(side.pokemon);
+    const moves = Array.from(side.active?.moves || []);
+    for (const native of legal) {
+      let command;
+      if (native.type === "switch") {
+        const mon = mons[native.data - 1]; // current dynamic slot
+        assert.ok(mon, `Missing dynamic slot ${native.data}`);
+        command = `switch ${mon.position}`; // stable Showdown party slot
+      } else if (native.type === "move") {
+        if (native.data < 1 || native.data > moves.length) continue;
+        command = `move ${moves[native.data - 1].id}`;
+      } else {
+        continue; // native pass is a wait, not a model action
+      }
+      assert.deepEqual(choice(sideId, command), native,
+        `Mismatch side=${sideId} choice=${command}`);
+    }
+  }
+  assertChoiceParity("p1");
+  assertChoiceParity("p2");
 
   // Verify a *real* native engine accepts both the party slot and move
   // conventions. Switch out of the lead, then switch back into party slot 1.
@@ -56,6 +81,8 @@ const sets = roster.map(([species, moves]) => ({
   assert.equal(switch2.type, engine.Choice.switch(2).type);
   assert.equal(switch2.data, engine.Choice.switch(2).data);
   res = battle.update(switch2, other);
+  assertChoiceParity("p1");
+  assertChoiceParity("p2");
 
   // Zig keeps the active mon in CURRENT slot 1. Its Side.slot(originalId)
   // translates a stable Showdown party position to the native 2..6 slot.
@@ -77,6 +104,8 @@ const sets = roster.map(([species, moves]) => ({
   assert.deepEqual(switch1, wanted);
   const c2 = choice("p2", "move 1");
   res = battle.update(switch1, c2);
+  assertChoiceParity("p1");
+  assertChoiceParity("p2");
 
   let steps = 2;
   for (; steps < 18 && !res.type; steps++) {
