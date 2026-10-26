@@ -46,6 +46,9 @@ def get_candidate_model(model_name: str, checkpoint: int):
     )
 
     if model_name == "TaurosV1":
+        # LocalFinetunedModel instantiates TaurosV1() to obtain observation
+        # and actor metadata; ensure that base constructor sees this checkout.
+        os.environ.setdefault("TAUROSV1_SAVE_DIR", str(Path("checkpoints").resolve()))
         # The *unmodified* parent of B1. Use the same CUDA-safe model and
         # stage-1 inference gin as B1; only the checkpoint weights differ.
         # The original TaurosV1 registry entry defaults to the scratchpad
