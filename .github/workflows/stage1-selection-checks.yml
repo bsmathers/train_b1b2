@@ -10,6 +10,7 @@ on:
       - 'tests/native_sim_integration.cjs'
       - 'metamon/env/vectorized/native_choice.js'
       - 'metamon/env/vectorized/native_pov.js'
+      - 'metamon/env/vectorized/native_request.js'
       - 'tests/test_native_pov.cjs'
       - 'metamon/env/vectorized/battle_host_engine.js'
       - 'metamon/env/vectorized/vector_env.py'
