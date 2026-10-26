@@ -1,0 +1,20 @@
+name: Stage-1 selection checks
+on:
+  pull_request:
+    paths:
+      - 'tools/select_stage1_b1_epoch.py'
+      - 'metamon/rl/stage1_b2_select.py'
+      - 'artifacts/good_teams_807.bz2.base64'
+      - 'tests/test_stage1_selection.py'
+      - '.github/workflows/stage1-selection-checks.yml'
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests -p 'test_stage1_selection.py' -v
