@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 import metamon.backend
 from metamon.env.metamon_battle import MetamonBackendBattle
+from metamon.env.vectorized.native_legal import canonical_legal_indices
 from metamon.interface import (
     ActionSpace,
     UniversalAction,
@@ -273,7 +274,9 @@ class StreamBattleLane:
         legal_actions = UniversalAction.definitely_valid_actions(
             state=state, battle=battle
         )
-        return [
+        encoded = [
             action_space.action_to_agent_output(state=state, action=action)
             for action in legal_actions
         ]
+
+        return canonical_legal_indices(encoded, self.last_request[side])
