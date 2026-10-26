@@ -844,6 +844,12 @@ class VectorizedShowdownEnv(gym.Env):
                     terminated[i] = bool(lane.ended) or hit_limit
                     truncated[i] = hit_limit and not lane.ended
                     infos[i]["won"] = bool(new_eval.battle_won)
+                    # The native tournament must distinguish a draw (including
+                    # a turn-limit truncation) from a loss. The old 'won' flag
+                    # alone reports both as False; capture this before restart.
+                    infos[i]["draw"] = bool(
+                        truncated[i] or (lane.ended and lane.winner is None)
+                    )
                     if self._saving:
                         self._save_lane_outcome(i, new_eval)
                     self._start_lane(i)

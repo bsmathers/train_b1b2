@@ -91,6 +91,33 @@ class SelectionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 select.validate_manifest(directory, {"a": 2})
 
+    def test_native_outcome_scoring(self):
+        # Score draws and turn-limit truncations as half a point; not losses.
+        native_spec = importlib.util.spec_from_file_location(
+            "native_matchup",
+            ROOT / "metamon" / "rl" / "evaluate" / "native_matchup.py",
+        )
+        native = importlib.util.module_from_spec(native_spec)
+        native_spec.loader.exec_module(native)
+        trunc = [False, False]
+        self.assertEqual(
+            native.finish_score(True, trunc, {"won": [True, False]}, 0), 1.0
+        )
+        self.assertEqual(
+            native.finish_score(True, trunc, {"won": [True, False]}, 1), 0.0
+        )
+        self.assertEqual(
+            native.finish_score(
+                True, trunc, {"won": [False, True], "draw": [True, False]}, 0
+            ),
+            0.5,
+        )
+        self.assertEqual(
+            native.finish_score(True, [True], {"won": [False], "draw": [True]}, 0), 0.5
+        )
+        with self.assertRaises(ValueError):
+            native.finish_score(False, [False], {"won": [True]}, 0)
+
     def test_dry_run_interpolation_grid(self):
         spec_b2 = importlib.util.spec_from_file_location(
             "stage1_b2", ROOT / "metamon" / "rl" / "stage1_b2_select.py"

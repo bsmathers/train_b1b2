@@ -163,7 +163,218 @@ def ranked_completed(rows):
     )
 
 
+def run_native_tournament(entries, output, args):
+    """Run each H2H match in one Zig-backed simulator with two local policies.
+
+    Use the same MatchupSpec IDs and ResultsTracker data as the old H2H runner,
+    so four-condition scoring and resume behavior remain unchanged.
+    """
+    import subprocess
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from queue import Queue
+    from metamon.rl.evaluate.results import MatchupResult, ResultsTracker
+
+    manifest = {
+        "transport": "native-zig",
+        "battles_per_side": args.battles_per_side,
+        "good_sha256": GOOD_SHA256,
+        "lanes": args.native_lanes,
+        "workers": args.native_workers,
+        "seed": args.seed,
+        "matchups": [row[-1].matchup_id for row in entries],
+    }
+    validate_manifest(output, manifest)
+    tracker = ResultsTracker(str(output))
+    # Fail before scheduling hundreds of workers if the native addon is missing.
+    if not args.dry_run:
+        import shutil as _shutil
+        from metamon.rl.evaluate.native_matchup import require_native_engine
+
+        if _shutil.which("node") is None:
+            raise RuntimeError("Node.js not found; run ./tools/setup_pkmn_engine.sh")
+        require_native_engine()
+    for candidate, own, other, reverse, spec in entries:
+        if args.dry_run:
+            print(
+                f"[native] {candidate} {own}/{other} side={2 if reverse else 1} "
+                f"battles={spec.n_battles} id={spec.matchup_id}"
+            )
+    if args.dry_run:
+        print(f"Total: {len(entries)} native Zig matchups (no Showdown server)")
+        return []
+
+    # Existing challenge-mode results MUST NOT be used for native selection:
+    # transport is part of the manifest above and mismatches are rejected.
+    # Incomplete records get re-run rather than entering checkpoint rankings.
+    required = {e[-1].matchup_id: e[-1].n_battles for e in entries}
+    done = {
+        result.matchup_id
+        for result in tracker.get_all_results()
+        if result.total_battles == required.get(result.matchup_id)
+    }
+    remaining = [e for e in entries if e[-1].matchup_id not in done]
+    print(
+        f"Native Zig tournament: {len(entries)} matchups, {len(done)} done, "
+        f"{len(remaining)} remaining; GPUs={args.gpus}; "
+        f"lanes={args.native_lanes}",
+        flush=True,
+    )
+    gpu_slots = Queue()
+    for gpu in args.gpus:
+        gpu_slots.put(gpu)
+
+    def play(entry):
+        candidate, own, other, reverse, spec = entry
+        gpu = gpu_slots.get()
+        try:
+            matchup_dir = output / spec.matchup_id
+            matchup_dir.mkdir(parents=True, exist_ok=True)
+            result_path = matchup_dir / "native_result.json"
+            log_path = matchup_dir / "native.log"
+            # Clear stale worker output before rerunning a failed matchup.
+            result_path.unlink(missing_ok=True)
+            model = "Stage1B2" if candidate.startswith("B2_") else "Stage1B1"
+            checkpoint = (
+                spec.policy_b.checkpoint if reverse else spec.policy_a.checkpoint
+            )
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            # Keep parity with the B1 CUDA launcher, which disables a
+            # torch.compile path known to fail for this AMAGO configuration.
+            env.setdefault("TORCHDYNAMO_DISABLE", "1")
+            cmd = [
+                sys.executable,
+                "-u",
+                "-m",
+                "metamon.rl.evaluate.native_matchup",
+                "--model",
+                model,
+                "--checkpoint",
+                str(checkpoint),
+                "--candidate-team",
+                "b1_good_807" if own == "good" else "hl_05_26",
+                "--opponent-team",
+                "b1_good_807" if other == "good" else "hl_05_26",
+                "--side",
+                str(int(reverse)),
+                "--battles",
+                str(spec.n_battles),
+                "--lanes",
+                str(args.native_lanes),
+                "--workers",
+                str(args.native_workers),
+                "--seed",
+                str(args.seed),
+                "--output",
+                str(result_path.resolve()),
+            ]
+            print(
+                f"Starting {candidate}: {own}/{other}, "
+                f"B1 side={'p2' if reverse else 'p1'} on GPU {gpu} "
+                f"(log: {log_path})",
+                flush=True,
+            )
+            with log_path.open("w") as log:
+                proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    cwd=str(ROOT),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+                start = time.monotonic()
+                last_report = start
+                while proc.poll() is None:
+                    elapsed = time.monotonic() - start
+                    if elapsed > args.timeout:
+                        proc.kill()
+                        proc.wait()
+                        raise TimeoutError(
+                            f"Native matchup timed out after {args.timeout}s"
+                        )
+                    if time.monotonic() - last_report > 30:
+                        print(
+                            f"  Still running {candidate} {own}/{other} "
+                            f"side={int(reverse)}; {elapsed:.0f}s; {log_path}",
+                            flush=True,
+                        )
+                        last_report = time.monotonic()
+                    time.sleep(1)
+                if proc.returncode != 0 or not result_path.is_file():
+                    raise RuntimeError(
+                        f"Native worker exited {proc.returncode} without valid "
+                        f"results. See {log_path}"
+                    )
+            data = json.loads(result_path.read_text())
+            if (
+                data.get("engine") != "zig-pkmn"
+                or data.get("battles") != spec.n_battles
+            ):
+                raise ValueError(f"Incomplete or invalid worker result: {result_path}")
+            wins = int(data["candidate_wins"])
+            losses = int(data["opponent_wins"])
+            draws = int(data["draws"])
+            if min(wins, losses, draws) < 0 or wins + losses + draws != spec.n_battles:
+                raise ValueError(f"Invalid win/loss/draw counts in {result_path}")
+            from datetime import datetime
+
+            return MatchupResult(
+                matchup_id=spec.matchup_id,
+                policy_a_name=spec.policy_a.short_label,
+                policy_b_name=spec.policy_b.short_label,
+                policy_a_wins=losses if reverse else wins,
+                policy_b_wins=wins if reverse else losses,
+                total_battles=spec.n_battles,
+                timestamp=datetime.now().isoformat(),
+            )
+        finally:
+            gpu_slots.put(gpu)
+
+    first_error = None
+    with ThreadPoolExecutor(
+        max_workers=min(args.max_concurrent, len(args.gpus))
+    ) as pool:
+        futures = {pool.submit(play, entry): entry for entry in remaining}
+        for future in as_completed(futures):
+            if future.cancelled():
+                continue
+            entry = futures[future]
+            try:
+                result = future.result()
+                tracker.record_result(result)
+                print(
+                    f"Completed {entry[0]} {entry[1]}/{entry[2]} "
+                    f"side={int(entry[3])}: {result.policy_a_wins}-"
+                    f"{result.policy_b_wins} (draws excluded)",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"FAILED {entry[0]} {entry[1]}/{entry[2]}: {exc}", flush=True)
+                # Stop at the first failure instead of attempting hundreds of
+                # broken matches with the same dependency/configuration error.
+                if first_error is None:
+                    first_error = exc
+                    for pending in futures:
+                        pending.cancel()
+    if first_error is not None:
+        raise RuntimeError(
+            "Native tournament failed; inspect the native.log named above, "
+            "fix the cause, and rerun to resume completed matchups."
+        ) from first_error
+    rows = score_tournament(entries, tracker.get_all_results(), output)
+    if any(not r["complete"] for r in rows):
+        raise RuntimeError(
+            "Native tournament incomplete. Inspect native.log in failed "
+            "matchup directories, then rerun the same command to resume."
+        )
+    return rows
+
+
 def run_tournament(entries, output, args):
+    if args.transport == "native":
+        return run_native_tournament(entries, output, args)
     from metamon.rl.evaluate.launch import run_all_matchups
     from metamon.rl.evaluate.results import ResultsTracker
 
@@ -221,12 +432,21 @@ def run_tournament(entries, output, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("b1", "b2", "both"), default="both")
+    parser.add_argument(
+        "--transport",
+        choices=("native", "showdown-server"),
+        default="native",
+        help="Native Zig battle host (default) or legacy websocket server.",
+    )
+    parser.add_argument("--native-lanes", type=int, default=8)
+    parser.add_argument("--native-workers", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--save-dir", type=Path, default=ROOT / "checkpoints")
     parser.add_argument("--taurosv1-dir", type=Path)
     parser.add_argument("--run-name", default="stage1_b1")
     parser.add_argument("--b2-run-name", default="stage1_b2_selection")
     parser.add_argument(
-        "--output-dir", type=Path, default=ROOT / "checkpoints" / "stage1_selection"
+        "--output-dir", type=Path, default=ROOT / "checkpoints" / "stage1_selection_zig"
     )
     parser.add_argument("--cache-dir", type=Path, default=ROOT / "cache")
     parser.add_argument(
@@ -247,6 +467,8 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.native_lanes < 1 or args.native_workers < 1:
+        parser.error("native lanes and native workers must be positive")
     if args.battles_per_side < 1 or args.top_k < 1 or args.max_concurrent < 1:
         parser.error("battle count, top-k and concurrency must be positive")
     if not args.gpus or any(not 0.0 <= alpha <= 1.0 for alpha in args.alphas):
