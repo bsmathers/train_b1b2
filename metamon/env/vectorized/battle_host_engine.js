@@ -208,7 +208,11 @@ function createEngineRequest(engineBattle, gen, sideId, playerName, res) {
   const side = engineBattle.side(sideId);
   const pokemonList = [];
 
-  for (const mon of Array.from(side.pokemon)) {
+  // Zig lists Pokemon in CURRENT switch order (the active mon is always
+  // dynamic slot 1). Showdown private |request| party entries MUST remain in
+  // ORIGINAL order throughout the entire battle. Pokemon.position is the
+  // stable original position; side.slot(position) maps it back for choices.
+  for (const mon of Array.from(side.pokemon).sort((a, b) => a.position - b.position)) {
     const speciesData = gen.species.get(mon.stored.species);
     const speciesName = speciesData ? speciesData.name : mon.stored.species;
     const maxHp = mon.stored.stats.hp;
