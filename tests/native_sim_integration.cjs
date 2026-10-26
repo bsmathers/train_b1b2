@@ -57,21 +57,19 @@ const sets = roster.map(([species, moves]) => ({
   assert.equal(switch2.data, engine.Choice.switch(2).data);
   res = battle.update(switch2, other);
 
-  // After leading Tauros has left the field, the Zig battle should make
-  // party slot 1 an explicit switch option.
+  // Zig keeps the active mon in CURRENT slot 1. Its Side.slot(originalId)
+  // translates a stable Showdown party position to the native 2..6 slot.
+  const sideAfter = battle.side("p1");
+  const dynamicLead = sideAfter.slot(1);
+  assert.ok(dynamicLead >= 2 && dynamicLead <= 6,
+    "Original party slot 1 should now be a switchable bench Pokemon");
+  const wanted = engine.Choice.switch(dynamicLead);
   const legalAfter = battle.choices("p1", res);
-  const wanted = engine.Choice.switch(1);
-  console.log("AFTER_SWITCH_DIAGNOSTIC", JSON.stringify({
-    result: res,
-    party: Array.from(battle.side("p1").pokemon).map(m => ({
-      species: m.stored.species, active: m.active,
-    })),
-    legal: legalAfter,
-    wanted,
-  }));
   assert.ok(legalAfter.some(v => v.type === wanted.type && v.data === wanted.data),
-    "Native battle must allow switching back into the original lead (slot 1)");
+    "Native battle must allow switching back to the original lead via a dynamic slot");
+  // Request is fixed Showdown position 1; resolver must emit the dynamic choice.
   const switch1 = choice("p1", "switch 1");
+  assert.deepEqual(switch1, wanted);
   const c2 = choice("p2", "move 1");
   res = battle.update(switch1, c2);
 
