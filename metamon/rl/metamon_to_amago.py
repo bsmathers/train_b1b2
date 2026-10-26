@@ -1595,6 +1595,16 @@ class MetamonAMAGODataset(RLDataset):
                 illegal_actions[i, legal_agent_action] = False
 
         obs_torch = {k: torch.from_numpy(np.stack(v, axis=0)) for k, v in obs.items()}
+        # MetamonDataset extracts W/L/D from the raw terminal UniversalState
+        # before tokenization and preserves it while slicing replay windows.
+        wld_actions = action_infos["trajectory_wld"]
+        if not wld_actions:
+            raise ValueError("trajectory has no actions from which to recover W/L/D")
+        if any(label != wld_actions[0] for label in wld_actions):
+            raise ValueError("trajectory contains inconsistent W/L/D labels")
+        obs_torch["trajectory_wld"] = torch.tensor(
+            wld_actions + [wld_actions[-1]], dtype=torch.long
+        ).unsqueeze(-1)
         missing_acts = torch.tensor(action_infos["missing"] + [True]).unsqueeze(-1)
         obs_torch["missing_action_mask"] = missing_acts
         obs_torch["illegal_actions"] = illegal_actions

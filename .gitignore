@@ -1,5 +1,6 @@
 *logs_and_checkpoints/
 checkpoints/
+/cache/
 test_vec_trajs/
 
 # Vectorized Showdown sim host — run `npm ci` in metamon/env/vectorized/

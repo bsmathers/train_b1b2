@@ -514,6 +514,20 @@ class MetamonDataset(Dataset):
             )
             action_infos["missing"].append(universal_action.missing)
 
+        # Preserve the battle outcome before converting the raw UniversalState
+        # sequence into the model observation schema.  The tokenizer does not
+        # expose battle_won/battle_lost, and downstream sequence sampling may
+        # remove the terminal state.  Store one label per action here so it is
+        # sliced in lockstep with every other action field below.
+        final_state = states[-1]
+        if final_state.battle_won and final_state.battle_lost:
+            raise ValueError("trajectory terminal state is both won and lost")
+        # Class order is loss, draw/unresolved, win.
+        wld_class = (
+            2 if final_state.battle_won else (0 if final_state.battle_lost else 1)
+        )
+        action_infos["trajectory_wld"] = [wld_class] * len(action_infos["chosen"])
+
         # Build rewards and dones
         rewards = np.array(
             [

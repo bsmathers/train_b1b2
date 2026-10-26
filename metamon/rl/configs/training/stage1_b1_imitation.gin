@@ -1,37 +1,17 @@
-import amago.agent
+import metamon.rl.stage1_b1
 
-# Stage-1 B1: imitation finetune of a TaurosV1 checkpoint.
-#
-# Same as TaurosV1's recipe (grouped_v2_large_isfilter.gin) except:
-#   - The advantage filter accepts every action (adv > -1e30 is always true),
-#     so the actor loss is plain imitation while the 4 critics keep training.
-#     (`fake_filter = True` would skip critic training entirely, and il.gin's
-#     `use_multigamma = False` changes the number of heads.)
-#   - Lower learning rate and shorter warmup for finetuning.
-
-agent.Agent.reward_multiplier = 10.
-agent.MultiTaskAgent.reward_multiplier = 10.
-
-agent.Agent.tau = .008
-agent.MultiTaskAgent.tau = .008
-
-agent.Agent.num_actions_for_value_in_critic_loss = 1
-agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
-agent.Agent.num_actions_for_value_in_actor_loss = 1
-agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
-
-agent.Agent.online_coeff = 0.0
-agent.MultiTaskAgent.online_coeff = 0.0
-agent.Agent.offline_coeff = 1.0
-agent.MultiTaskAgent.offline_coeff = 1.0
-
-agent.Agent.fbc_filter_func = @agent.binary_filter
-agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
-agent.binary_filter.threshold = -1e30
-
-MetamonAMAGOExperiment.l2_coeff = 1e-4
-MetamonAMAGOExperiment.learning_rate = 3e-5
+# B1 replaces Epoch475's four shaped-reward Q critics with a categorical
+# win/loss/draw value head and a staged, constrained offline objective.
+MetamonAMAGOExperiment.agent_type = @stage1_b1.Stage1B1Agent
+MetamonAMAGOExperiment.l2_coeff = 0.0
+MetamonAMAGOExperiment.learning_rate = 3e-6
 MetamonAMAGOExperiment.grad_clip = 1.0
-agent.Agent.critic_loss_weight = 13.5
-agent.MultiTaskAgent.critic_loss_weight = 13.5
-MetamonAMAGOExperiment.lr_warmup_steps = 2000
+MetamonAMAGOExperiment.lr_warmup_steps = 500
+
+stage1_b1.Stage1B1Agent.policy_kl_coef = 1.0
+stage1_b1.Stage1B1Agent.value_kl_coef = 1.0
+stage1_b1.Stage1B1Agent.l2sp_coef = 1e-3
+stage1_b1.Stage1B1Agent.actor_value_coef = 1.0
+stage1_b1.Stage1B1Agent.awr_temperature = 0.5
+stage1_b1.Stage1B1Agent.awr_min_weight = 0.25
+stage1_b1.Stage1B1Agent.awr_max_weight = 4.0

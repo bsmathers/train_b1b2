@@ -20,24 +20,25 @@ fi
 DATASET_CONFIG="${DATASET_CONFIG:-${ROOT_DIR}/metamon/rl/configs/datasets/stage1_b1_strong.yaml}"
 SAVE_DIR="${SAVE_DIR:-${ROOT_DIR}/checkpoints}"
 RUN_NAME="${RUN_NAME:-stage1_b1}"
-EPOCHS="${EPOCHS:-30}"
-STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-1000}"
+EPOCHS="${EPOCHS:-2100}"
+STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-100}"
 BATCH_SIZE="${BATCH_SIZE:-12}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 DLOADER_WORKERS="${DLOADER_WORKERS:-8}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 
 mkdir -p "${METAMON_CACHE_DIR}" "${SAVE_DIR}"
+cd "${ROOT_DIR}"
 
 # The launcher can be run directly from a source checkout without installing
 # metamon itself. In that case, ensure its required poke-env distribution is
 # installed in the *same* interpreter used to start training. Importing the
 # source package alone is not enough: metamon checks distribution metadata.
-if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env")' >/dev/null 2>&1; then
-    echo "poke-env is not installed for ${PYTHON_BIN}; installing the repository dependency..."
-    "${PYTHON_BIN}" -m pip install 'poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git'
-    if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env")' >/dev/null 2>&1; then
-        echo "ERROR: poke-env is still not installed for ${PYTHON_BIN} after installation." >&2
+if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env"); version("amago")' >/dev/null 2>&1; then
+    echo "Installing Metamon and its pinned Python dependencies"
+    "${PYTHON_BIN}" -m pip install -e "${ROOT_DIR}"
+    if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env"); version("amago")' >/dev/null 2>&1; then
+        echo "ERROR: poke-env or AMAGO is still unavailable for ${PYTHON_BIN}." >&2
         exit 1
     fi
 fi
@@ -63,12 +64,15 @@ if [ ! -d "${GOOD_REPLAYS_DIR}/gen1ou" ] && [ ! -f "${GOOD_REPLAYS_DIR}/gen1ou.t
     "${ROOT_DIR}/tools/prepare_strong_replays.sh"
 fi
 
+echo "Preparing Gen1 OU human and pac-tauros replay datasets"
+"${PYTHON_BIN}" -m metamon.data.download parsed-replays --formats gen1ou
+"${PYTHON_BIN}" -m metamon.data.download self-play --subsets pac-tauros --formats gen1ou
+
 LOG_ARG=""
 if [ -n "${WANDB_API_KEY:-}" ]; then
     LOG_ARG="--log"
 fi
 
-cd "${ROOT_DIR}"
 exec "${PYTHON_BIN}" -m metamon.rl.finetune \
     --run_name "${RUN_NAME}" \
     --save_dir "${SAVE_DIR}" \
@@ -90,5 +94,12 @@ exec "${PYTHON_BIN}" -m metamon.rl.finetune \
     --validation_seed 42 \
     --early_stopping_patience 5 \
     --early_stopping_min_delta 0.001 \
+    --stage1_b1_pipeline \
+    --b1_value_head_epochs 100 \
+    --b1_value_backbone_epochs 1000 \
+    --b1_actor_epochs 1000 \
+    --b1_value_head_patience 3 \
+    --b1_value_backbone_patience 5 \
+    --b1_actor_patience 5 \
     --eval_gens \
     ${LOG_ARG}

@@ -1,7 +1,10 @@
-# Stage-1 B1: imitate only the local curated strong-bot games.
-replay_weight: 0.0
+# Stage-1 B1: balanced outcome/value pretraining and constrained actor fitting.
+# Human and pac-tauros datasets are downloaded automatically by Metamon.
+replay_weight: 0.40
+self_play:
+  pac-tauros: 0.10
 custom_replays:
   - dir: ${GOOD_REPLAYS_DIR}
-    weight: 1.0
+    weight: 0.50
 formats:
   - gen1ou
