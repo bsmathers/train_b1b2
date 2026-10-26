@@ -61,6 +61,14 @@ const sets = roster.map(([species, moves]) => ({
   // party slot 1 an explicit switch option.
   const legalAfter = battle.choices("p1", res);
   const wanted = engine.Choice.switch(1);
+  console.log("AFTER_SWITCH_DIAGNOSTIC", JSON.stringify({
+    result: res,
+    party: Array.from(battle.side("p1").pokemon).map(m => ({
+      species: m.stored.species, active: m.active,
+    })),
+    legal: legalAfter,
+    wanted,
+  }));
   assert.ok(legalAfter.some(v => v.type === wanted.type && v.data === wanted.data),
     "Native battle must allow switching back into the original lead (slot 1)");
   const switch1 = choice("p1", "switch 1");
