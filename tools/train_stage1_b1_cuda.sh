@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 export TAUROSV1_SAVE_DIR="${TAUROSV1_SAVE_DIR:-${ROOT_DIR}/checkpoints}"
 export METAMON_CACHE_DIR="${METAMON_CACHE_DIR:-${ROOT_DIR}/cache}"
-export GOOD_REPLAYS_DIR="${GOOD_REPLAYS_DIR:-${ROOT_DIR}/../strong_model_replays_parsed}"
+export GOOD_REPLAYS_DIR="${GOOD_REPLAYS_DIR:-${ROOT_DIR}/cache/strong_model_replays_parsed}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 # The installed AMAGO version decorates the transformer path with torch.compile,
 # which has failed during local smoke tests. Eager execution still dispatches
@@ -47,9 +47,7 @@ if [ ! -f "${TAUROSV1_SAVE_DIR}/mediumg1online/ckpts/policy_weights/policy_epoch
 fi
 
 if [ ! -d "${GOOD_REPLAYS_DIR}/gen1ou" ] && [ ! -f "${GOOD_REPLAYS_DIR}/gen1ou.tar" ]; then
-    echo "ERROR: strong-model trajectories are missing from ${GOOD_REPLAYS_DIR}"
-    echo "Set GOOD_REPLAYS_DIR to the parsed replay root containing gen1ou/ or gen1ou.tar."
-    exit 1
+    "${ROOT_DIR}/tools/prepare_strong_replays.sh"
 fi
 
 LOG_ARG=""
