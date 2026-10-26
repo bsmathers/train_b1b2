@@ -163,6 +163,28 @@ def ranked_completed(rows):
     )
 
 
+
+def native_log_tail(path: Path, max_bytes: int = 16_384, max_lines: int = 80) -> str:
+    """Return the relevant end of a failed native worker log without loading it all.
+
+    The launcher error alone only reports subprocess exit status. Include the
+    worker's actual Python/Node exception so a simulator invariant failure can
+    be diagnosed directly from the console.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            end = handle.tell()
+            handle.seek(max(0, end - max_bytes))
+            raw = handle.read()
+    except OSError as exc:
+        return f"(could not read {path}: {exc})"
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if end > max_bytes and lines:
+        lines = lines[1:]  # first line may be cut in the middle
+    return "\n".join(lines[-max_lines:]) or "(worker produced no log output)"
+
+
 def run_native_tournament(entries, output, args):
     """Run each H2H match in one Zig-backed simulator with two local policies.
 
@@ -292,7 +314,10 @@ def run_native_tournament(entries, output, args):
                         proc.kill()
                         proc.wait()
                         raise TimeoutError(
-                            f"Native matchup timed out after {args.timeout}s"
+                            f"Native matchup timed out after {args.timeout}s; "
+                            f"log: {log_path}\n"
+                            f"--- native worker log (tail) ---\n"
+                            f"{native_log_tail(log_path)}"
                         )
                     if time.monotonic() - last_report > 30:
                         print(
@@ -305,7 +330,9 @@ def run_native_tournament(entries, output, args):
                 if proc.returncode != 0 or not result_path.is_file():
                     raise RuntimeError(
                         f"Native worker exited {proc.returncode} without valid "
-                        f"results. See {log_path}"
+                        f"results. See {log_path}\n"
+                        f"--- native worker log (tail) ---\n"
+                        f"{native_log_tail(log_path)}"
                     )
             data = json.loads(result_path.read_text())
             if (
