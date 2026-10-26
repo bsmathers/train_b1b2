@@ -2,6 +2,7 @@
 
 This intentionally mocks node/zig/npm: no network access or compiler needed.
 """
+
 import os
 import shutil
 import subprocess
@@ -59,7 +60,7 @@ class NativeSetupTests(unittest.TestCase):
             npm = binaries / "npm"
             npm.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"--version\" ]; then echo 10.8.2; "
+                'if [ "$1" = "--version" ]; then echo 10.8.2; '
                 "else exit 3; fi\n"
             )
             zig = binaries / "zig"
