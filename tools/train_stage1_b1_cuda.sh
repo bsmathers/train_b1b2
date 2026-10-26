@@ -32,6 +32,17 @@ PAC_TAUROS_TRAJECTORIES="${PAC_TAUROS_TRAJECTORIES:-250000}"
 CKPT_INTERVAL="${CKPT_INTERVAL:-10}"
 
 mkdir -p "${METAMON_CACHE_DIR}" "${SAVE_DIR}"
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock is required to prevent concurrent Stage1 B1 runs." >&2
+    exit 1
+fi
+exec 9>"${SAVE_DIR}/.${RUN_NAME}.lock"
+if ! flock -n 9; then
+    echo "ERROR: another ${RUN_NAME} launcher or trainer is already running." >&2
+    exit 1
+fi
+
 cd "${ROOT_DIR}"
 
 # The launcher can be run directly from a source checkout without installing

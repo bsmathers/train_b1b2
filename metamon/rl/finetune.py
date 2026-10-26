@@ -56,6 +56,7 @@ on the next iteration.
 
 import os
 import random
+import signal
 
 import torch
 import torch.nn.functional as F
@@ -81,6 +82,19 @@ from metamon.rl.dataset_config import (
 from metamon.rl.pretrained import get_pretrained_model_names, get_pretrained_model
 from metamon.interface import get_reward_function_names, get_reward_function
 from metamon.rl.stage1_b1 import Stage1B1Agent, run_staged_b1
+
+
+def _install_fast_interrupt_handler() -> None:
+    """Exit immediately on terminal interrupt instead of waiting on cleanup."""
+
+    def _exit_now(signum, _frame):
+        try:
+            os.write(2, b"\nTraining interrupted; exiting immediately.\n")
+        finally:
+            os._exit(128 + signum)
+
+    signal.signal(signal.SIGINT, _exit_now)
+    signal.signal(signal.SIGTERM, _exit_now)
 
 
 def add_cli(parser):
@@ -369,6 +383,8 @@ def _learn_with_early_stopping(
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
+
+    _install_fast_interrupt_handler()
 
     parser = ArgumentParser(
         description="Iterative finetuning with MetamonFinetuneAgent."
