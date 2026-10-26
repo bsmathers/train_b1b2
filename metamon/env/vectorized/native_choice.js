@@ -7,8 +7,9 @@
  * UniversalAction.action_idx_to_BattleOrder(), then converted to a Showdown
  * choice ("move <name/slot>" or "switch <party slot>").
  *
- * Numeric switches are 1-based **party** slots 1..6, including the lead
- * after it has switched out. Numeric moves are 1-based active move slots 1..4.
+ * Numeric Showdown switches refer to ORIGINAL 1-based party positions 1..6.
+ * Native Zig choices use CURRENT dynamic slots 2..6 (slot 1 is active).
+ * Translate via side.slot(originalPosition). Numeric moves are active slots 1..4.
  * Every explicit choice must match an entry in battle.choices(); a mismatch is
  * an adapter error and MUST NOT silently execute validChoices[0].
  *
@@ -59,14 +60,19 @@ function resolveNativeChoice(choiceStr, validChoices, side, Choice) {
     }
   } else {
     const mons = Array.from(side.pokemon || []);
-    // Both "switch 1" and "switch 6" are valid 1-based party slots.
+    // A Showdown "switch N" means the ORIGINAL party position. Zig shuffles
+    // active Pokemon into dynamic slot 1, and only allows Choice.switch(2..6).
+    let originalPosition;
     if (/^[1-6]$/.test(target)) {
-      slot = Number(target);
+      originalPosition = Number(target);
     } else {
-      const matches = mons.flatMap((mon, i) =>
-        normalizedId(mon.stored?.species) === normalizedId(target) ? [i + 1] : []
+      const matches = mons.filter(mon =>
+        normalizedId(mon.stored?.species) === normalizedId(target)
       );
-      if (matches.length === 1) slot = matches[0];
+      if (matches.length === 1) originalPosition = matches[0].position;
+    }
+    if (originalPosition !== undefined) {
+      slot = side.slot(originalPosition);
     }
   }
 
