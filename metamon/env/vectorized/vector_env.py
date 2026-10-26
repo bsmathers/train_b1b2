@@ -434,9 +434,19 @@ class VectorizedShowdownEnv(gym.Env):
         legal = lane.legal_action_indices(side, action_space, state)
         idx = int(raw_idx)
         if idx not in legal:
+            if os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
+                raise RuntimeError(
+                    f"Illegal model action lane={i} side={side} idx={idx}; "
+                    f"legal={legal}. Native tournament refuses to substitute "
+                    "a random legal action for an invalid policy output."
+                )
             idx = int(self._rng.choice(legal)) if legal else idx
         choice = action_idx_to_choice(idx, lane.battle(side), lane.last_request[side])
         if choice is None:
+            if os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
+                raise RuntimeError(
+                    f"Cannot translate legal action lane={i} side={side} idx={idx}"
+                )
             choice = DEFAULT_CHOICE
         return idx, choice
 
@@ -464,8 +474,14 @@ class VectorizedShowdownEnv(gym.Env):
         self._committed_side_actions[(i, side)] = int(used_idx)
         self.proc.choose(i, side, choice)
 
-    def _choose_opponent_side(self, i: int) -> None:
-        """Answer a single opponent-side request with the batched opponent policy."""
+    def _choose_opponent_side(self, i: int) -> Tuple[int, int, UniversalState]:
+        """Answer an opponent-only decision and return its RL2 feedback record.
+
+        An opponent action is a genuine model decision even when the evaluated
+        player is waiting. The caller MUST later call _record_opp_rewards()
+        before the next forward pass for this lane.
+        """
+        previous = self.lanes[i].universal_state(self.opp_side)
         active = np.zeros((self.batched_envs,), dtype=bool)
         active[i] = True
         actions = self.opponent.act(active, self._opp_obs_list(active))
@@ -477,6 +493,7 @@ class VectorizedShowdownEnv(gym.Env):
         )
         self._committed_side_actions[(i, self.opp_side)] = int(used_idx)
         self.proc.choose(i, self.opp_side, choice)
+        return i, int(used_idx), previous
 
     def _send_side(self, i: int, side: str, *, reprompt: bool = False) -> None:
         """Re-answer a single side after an ``|error|`` re-prompt.
@@ -536,6 +553,7 @@ class VectorizedShowdownEnv(gym.Env):
             i: {s: self.lanes[i].request_serial[s] for s in SIDES} for i in lane_indices
         }
         err_handled = {i: {s: -1 for s in SIDES} for i in lane_indices}
+        auto_opp_pending: List[Tuple[int, int, UniversalState]] = []
 
         def ready() -> bool:
             done = True
@@ -569,7 +587,16 @@ class VectorizedShowdownEnv(gym.Env):
                         # resolve. (An asymmetric *eval* request just means we
                         # are waiting for the other side's request to arrive so
                         # the lane can park at the eval decision -- keep pumping.)
-                        self._choose_opponent_side(i)
+                        # Record the additional opponent action for RL2.
+                        # If this lane requires multiple auto-actions within
+                        # one settle barrier, fail rather than reuse stale RL2.
+                        if any(entry[0] == i for entry in auto_opp_pending):
+                            raise RuntimeError(
+                                f"Multiple opponent-only decisions in a single "
+                                f"settle barrier for lane {i}; cannot preserve "
+                                f"RL2 alignment without an intermediate observe"
+                            )
+                        auto_opp_pending.append(self._choose_opponent_side(i))
                         answered[i][s] = lane.request_serial[s]
                     elif (
                         not advanced
@@ -581,6 +608,10 @@ class VectorizedShowdownEnv(gym.Env):
             return done
 
         self.proc.pump_until(ready)
+        # The ordinary acting path records opponent feedback in step() and
+        # _advance_lanes(). These asynchronous opponent-only decisions would
+        # otherwise update the transformer cache but not RL2/time_idx.
+        self._record_opp_rewards(auto_opp_pending)
 
     def _opp_obs_list(self, opp_active: np.ndarray) -> List[dict]:
         obs_list: List[dict] = []

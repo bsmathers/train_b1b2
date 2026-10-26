@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Dict, List, Optional, Tuple
 
 import metamon.backend
@@ -147,6 +148,11 @@ class StreamBattleLane:
                 battle.parse_message(parts)
                 self._touch_side(stream)
             except Exception as exc:  # noqa: BLE001
+                if os.environ.get("METAMON_NATIVE_STRICT_PARSER") == "1":
+                    raise RuntimeError(
+                        f"Native protocol parse error lane={self.lane_id} "
+                        f"side={stream} line={line[:160]!r}"
+                    ) from exc
                 _LANE_LOGGER.debug(
                     "lane %s side %s parse_message failed on %r: %s",
                     self.lane_id,

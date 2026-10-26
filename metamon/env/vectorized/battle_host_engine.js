@@ -1,4 +1,6 @@
 "use strict";
+const { resolveNativeChoice } = require("./native_choice");
+const { createEngineRequest } = require("./native_request");
 
 /**
  * High-speed vectorized battle host adapter powered by @pkmn/engine.
@@ -201,64 +203,6 @@ class ShowdownLane {
 // Fast Native @pkmn/engine Lane (Gen 1)
 // ---------------------------------------------------------------------------
 
-function createEngineRequest(engineBattle, gen, sideId, playerName, res) {
-  const isP1 = sideId === "p1";
-  const playerChoiceType = isP1 ? res.p1 : res.p2;
-  const side = engineBattle.side(sideId);
-  const pokemonList = [];
-
-  for (const mon of Array.from(side.pokemon)) {
-    const speciesData = gen.species.get(mon.stored.species);
-    const speciesName = speciesData ? speciesData.name : mon.stored.species;
-    const maxHp = mon.stored.stats.hp;
-    const condition =
-      mon.hp === 0
-        ? "0 fnt"
-        : mon.status
-        ? `${mon.hp}/${maxHp} ${mon.status}`
-        : `${mon.hp}/${maxHp}`;
-    const moveIds = Array.from(mon.stored.moves).map((m) => m.id);
-
-    pokemonList.push({
-      ident: `${sideId}: ${speciesName}`,
-      details: speciesName,
-      condition: condition,
-      active: mon.active,
-      stats: mon.stored.stats,
-      moves: moveIds,
-      baseAbility: "",
-      item: "",
-      pokeball: "pokeball",
-    });
-  }
-
-  const sideObj = { name: playerName, id: sideId, pokemon: pokemonList };
-
-  if (playerChoiceType === "pass" || !playerChoiceType) {
-    if (res.type) return null;
-    return { wait: true, side: sideObj };
-  }
-
-  if (playerChoiceType === "switch") {
-    return { forceSwitch: [true], side: sideObj };
-  }
-
-  const activeMoves = [];
-  for (const m of Array.from(side.active.moves)) {
-    const moveData = gen.moves.get(m.id);
-    const moveName = moveData ? moveData.name : m.id;
-    activeMoves.push({
-      move: moveName,
-      id: m.id,
-      pp: m.pp,
-      maxpp: Math.floor((moveData.pp * 8) / 5),
-      target: moveData.target,
-      disabled: !!m.disabled,
-    });
-  }
-
-  return { active: [{ moves: activeMoves }], side: sideObj };
-}
 
 function stringifyProtocolLine(line) {
   let s = "|" + line.args.join("|");
@@ -289,6 +233,7 @@ class EngineLane {
 
       const p1Team = Showdown.Teams.unpack(p1spec.team);
       const p2Team = Showdown.Teams.unpack(p2spec.team);
+      this.originalTeams = { p1: p1Team, p2: p2Team };
       this.playerNames = {
         p1: String(p1spec.name || "p1"),
         p2: String(p2spec.name || "p2"),
@@ -335,10 +280,10 @@ class EngineLane {
         .map(stringifyProtocolLine)
         .filter(line => line !== "|tie" && !line.startsWith("|win|"));
       const reqP1 = createEngineRequest(
-        this.battle, gen1, "p1", this.playerNames.p1, res
+        this.battle, gen1, "p1", this.playerNames.p1, res, this.originalTeams.p1
       );
       const reqP2 = createEngineRequest(
-        this.battle, gen1, "p2", this.playerNames.p2, res
+        this.battle, gen1, "p2", this.playerNames.p2, res, this.originalTeams.p2
       );
 
       // @pkmn/engine's compact battle log omits the simulator's player
@@ -383,63 +328,10 @@ class EngineLane {
   _resolveChoice(sideId, choiceStr) {
     const { Choice } = pkmnEngine;
     if (!this.lastResult) return Choice.pass;
-
-    let validChoices = [];
-    try {
-      validChoices = this.battle.choices(sideId, this.lastResult) || [];
-    } catch (_) {
-      validChoices = [];
-    }
-    if (validChoices.length === 0) {
-      return Choice.pass;
-    }
-
-    if (!choiceStr || choiceStr === "default" || choiceStr === "pass") {
-      return validChoices[0];
-    }
-
-    const parts = choiceStr.trim().split(/\s+/);
-    const verb = parts[0].toLowerCase();
-    const target = parts.slice(1).join(" ").toLowerCase();
-    const side = this.battle.side(sideId);
-
-    let candidate = null;
-    if (verb === "move") {
-      let slot = /^[1-4]$/.test(target) ? parseInt(target, 10) : 0;
-      if (!slot) {
-        const norm = target.replace(/[^a-z0-9]/g, "");
-        const moves = Array.from(side.active.moves);
-        for (let i = 0; i < moves.length; i++) {
-          if (moves[i].id.replace(/[^a-z0-9]/g, "") === norm) {
-            slot = i + 1;
-            break;
-          }
-        }
-      }
-      if (slot) candidate = Choice.move(slot);
-    } else if (verb === "switch") {
-      let slot = /^[2-6]$/.test(target) ? parseInt(target, 10) : 0;
-      if (!slot) {
-        const norm = target.replace(/[^a-z0-9]/g, "");
-        const mons = Array.from(side.pokemon);
-        for (let i = 0; i < mons.length; i++) {
-          if (mons[i].stored.species.toLowerCase().replace(/[^a-z0-9]/g, "") === norm) {
-            slot = i + 1;
-            break;
-          }
-        }
-      }
-      if (slot) candidate = Choice.switch(slot);
-    }
-
-    if (candidate) {
-      const match = validChoices.find(
-        (v) => v.type === candidate.type && v.data === candidate.data
-      );
-      if (match) return match;
-    }
-
-    return validChoices[0];
+    const choices = this.battle.choices(sideId, this.lastResult) || [];
+    // A requested action must agree with native legal choices; never replace
+    // an unmatched move/switch with the first legal choice.
+    return resolveNativeChoice(choiceStr, choices, this.battle.side(sideId), Choice);
   }
 
   choose(side, choiceStr, epoch) {

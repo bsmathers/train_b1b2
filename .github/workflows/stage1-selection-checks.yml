@@ -5,6 +5,17 @@ on:
       - 'tools/select_stage1_b1_epoch.py'
       - 'tools/setup_pkmn_engine.sh'
       - 'tests/test_native_setup.py'
+      - 'tests/test_native_choice.cjs'
+      - 'tests/test_native_input_contract.py'
+      - 'tests/native_sim_integration.cjs'
+      - 'metamon/env/vectorized/native_choice.js'
+      - 'metamon/env/vectorized/native_pov.js'
+      - 'metamon/env/vectorized/native_request.js'
+      - 'tests/test_native_pov.cjs'
+      - 'metamon/env/vectorized/battle_host_engine.js'
+      - 'metamon/env/vectorized/vector_env.py'
+      - 'metamon/env/vectorized/lane.py'
+      - 'metamon/rl/evaluate/native_matchup.py'
       - 'metamon/rl/stage1_b2_select.py'
       - 'artifacts/good_teams_807.bz2.base64'
       - 'tests/test_stage1_selection.py'
@@ -22,3 +33,16 @@ jobs:
       - run: bash -n tools/setup_pkmn_engine.sh
       - run: python -m unittest discover -s tests -p 'test_native_setup.py' -v
       - run: python -m unittest discover -s tests -p 'test_stage1_selection.py' -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Native player-observation and legal-mask contract tests
+        run: python -m unittest discover -s tests -p 'test_native_input_contract.py' -v
+      - name: Native choice translation regression suite
+        run: node --test tests/test_native_choice.cjs
+      - name: Native two-POV request identity and order regression
+        run: node --test tests/test_native_pov.cjs
+      - name: Build Zig native engine
+        run: ./tools/setup_pkmn_engine.sh
+      - name: Real Zig simulation switch-back integration
+        run: node tests/native_sim_integration.cjs

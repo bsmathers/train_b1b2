@@ -32,6 +32,10 @@ def require_native_engine() -> None:
     os.environ["METAMON_BATTLE_HOST"] = str(host_dir / "battle_host_engine.js")
     os.environ["METAMON_PKMN_ENGINE"] = str(native.resolve())
     os.environ["METAMON_REQUIRE_PKMN_ENGINE"] = "1"
+    # Fail rather than scoring model actions silently repaired by an adapter.
+    # Parser errors must not discard historical battle events during selection.
+    os.environ.setdefault("METAMON_NATIVE_STRICT_ACTIONS", "1")
+    os.environ.setdefault("METAMON_NATIVE_STRICT_PARSER", "1")
 
 
 def get_candidate_model(model_name: str, checkpoint: int):
@@ -72,6 +76,49 @@ def finish_score(done, truncated, info, lane: int) -> float:
     return 1.0 if won[lane] else 0.0
 
 
+def validate_native_inputs(env, obs, action_dim: int) -> None:
+    """Check private request ownership and the exact model legality mask.
+
+    These invariants are inexpensive enough to run on every decision batch.
+    They catch p1/p2 request mixups and differences between the legal actions
+    the model sees and those used by the Python action adapter.
+    """
+    masks = obs.get("illegal_actions")
+    if masks is None or len(masks) != env.batched_envs:
+        raise RuntimeError("Native evaluation observation has no per-lane action mask")
+    for i, lane in enumerate(env.lanes):
+        for side in ("p1", "p2"):
+            request = lane.last_request.get(side)
+            own = (request or {}).get("side") or {}
+            if own.get("id") != side:
+                raise RuntimeError(
+                    f"Native input ownership mismatch lane={i} side={side}: "
+                    f"request side.id={own.get('id')!r}"
+                )
+            for pokemon in own.get("pokemon", []):
+                if not pokemon.get("ident", "").startswith(side + ": "):
+                    raise RuntimeError(
+                        f"Native private team leaked/mislabeled lane={i} side={side}: "
+                        f"{pokemon.get('ident')!r}"
+                    )
+        legal = set(lane.legal_action_indices(env.eval_side, env.eval_action_space))
+        if not legal:
+            raise RuntimeError(
+                f"Native evaluation lane={i} has no legal action at decision"
+            )
+        mask = masks[i]
+        if len(mask) != action_dim:
+            raise RuntimeError(
+                f"Native action mask width={len(mask)}; expected {action_dim}"
+            )
+        for idx in range(action_dim):
+            if bool(mask[idx]) != (idx not in legal):
+                raise RuntimeError(
+                    f"Native action mask mismatch lane={i} action={idx}; "
+                    f"mask={bool(mask[idx])}, legal={idx in legal}"
+                )
+
+
 def run(args):
     require_native_engine()
     import numpy as np
@@ -97,6 +144,11 @@ def run(args):
     )
     candidate_policy = candidate_exp.policy.to(device).eval()
     opponent_policy = opponent_exp.policy.to(device).eval()
+    # Policy actions are sampled, not argmax. Seed PyTorch after both model
+    # loads so the same test configuration has reproducible sampling streams.
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     candidate = AmagoBatchedOpponent(
         policy=candidate_policy,
         device=device,
@@ -144,6 +196,7 @@ def run(args):
                     f"Native matchup exceeded {args.max_steps} vector steps; "
                     f"finished {len(scores)} of {args.battles} games"
                 )
+            validate_native_inputs(env, obs, candidate_model.action_space.gym_space.n)
             active = np.ones(lanes, dtype=bool)
             actions = candidate.act(active, unstack_obs_dicts(obs))
             obs, reward, terminated, truncated, info = env.step(actions)
