@@ -15,6 +15,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 import time
 import yaml
 from argparse import ArgumentParser
@@ -545,7 +546,7 @@ def run_matchup_pair(
         policy: PolicySpec, username: str, opponent_username: str, role: str
     ):
         cmd = [
-            "python",
+            sys.executable,
             serve_script,
             "--model_name",
             policy.model_name,
