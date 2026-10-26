@@ -47,11 +47,15 @@ def generate_interpolations(combinations, taurosv1_dir, save_dir, b1_run, b2_run
             cached_base = (row["theta0"], torch.load(row["theta0"], map_location="cpu", weights_only=True))
         if cached_b1[0] != row["theta1"]:
             cached_b1 = (row["theta1"], torch.load(row["theta1"], map_location="cpu", weights_only=True))
-        state = interpolate(cached_base[1], cached_b1[1], row["alpha"])
+        if row["alpha"] == 0.0:
+            state = cached_base[1]  # preserve exact TaurosV1 endpoint
+        elif row["alpha"] == 1.0:
+            state = cached_b1[1]  # preserve exact B1 endpoint
+        else:
+            state = interpolate(cached_base[1], cached_b1[1], row["alpha"])
         partial = destination.with_suffix(".pt.tmp")
         torch.save(state, partial)
         partial.replace(destination)
-        del state
         print(f"Generated B2 #{row['id']}: base={row['base_epoch']} "
               f"B1={row['b1_epoch']} alpha={row['alpha']}")
     return rows
