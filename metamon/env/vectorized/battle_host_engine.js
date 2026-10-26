@@ -1,5 +1,6 @@
 "use strict";
 const { resolveNativeChoice } = require("./native_choice");
+const { originalPartyOrder, privateIdent } = require("./native_pov");
 
 /**
  * High-speed vectorized battle host adapter powered by @pkmn/engine.
@@ -202,7 +203,7 @@ class ShowdownLane {
 // Fast Native @pkmn/engine Lane (Gen 1)
 // ---------------------------------------------------------------------------
 
-function createEngineRequest(engineBattle, gen, sideId, playerName, res) {
+function createEngineRequest(engineBattle, gen, sideId, playerName, res, originalTeam) {
   const isP1 = sideId === "p1";
   const playerChoiceType = isP1 ? res.p1 : res.p2;
   const side = engineBattle.side(sideId);
@@ -212,7 +213,7 @@ function createEngineRequest(engineBattle, gen, sideId, playerName, res) {
   // dynamic slot 1). Showdown private |request| party entries MUST remain in
   // ORIGINAL order throughout the entire battle. Pokemon.position is the
   // stable original position; side.slot(position) maps it back for choices.
-  for (const mon of Array.from(side.pokemon).sort((a, b) => a.position - b.position)) {
+  for (const mon of originalPartyOrder(side)) {
     const speciesData = gen.species.get(mon.stored.species);
     const speciesName = speciesData ? speciesData.name : mon.stored.species;
     const maxHp = mon.stored.stats.hp;
@@ -225,7 +226,7 @@ function createEngineRequest(engineBattle, gen, sideId, playerName, res) {
     const moveIds = Array.from(mon.stored.moves).map((m) => m.id);
 
     pokemonList.push({
-      ident: `${sideId}: ${speciesName}`,
+      ident: privateIdent(sideId, mon, originalTeam, speciesName),
       details: speciesName,
       condition: condition,
       active: mon.active,
@@ -294,6 +295,7 @@ class EngineLane {
 
       const p1Team = Showdown.Teams.unpack(p1spec.team);
       const p2Team = Showdown.Teams.unpack(p2spec.team);
+      this.originalTeams = { p1: p1Team, p2: p2Team };
       this.playerNames = {
         p1: String(p1spec.name || "p1"),
         p2: String(p2spec.name || "p2"),
@@ -340,10 +342,10 @@ class EngineLane {
         .map(stringifyProtocolLine)
         .filter(line => line !== "|tie" && !line.startsWith("|win|"));
       const reqP1 = createEngineRequest(
-        this.battle, gen1, "p1", this.playerNames.p1, res
+        this.battle, gen1, "p1", this.playerNames.p1, res, this.originalTeams.p1
       );
       const reqP2 = createEngineRequest(
-        this.battle, gen1, "p2", this.playerNames.p2, res
+        this.battle, gen1, "p2", this.playerNames.p2, res, this.originalTeams.p2
       );
 
       // @pkmn/engine's compact battle log omits the simulator's player
