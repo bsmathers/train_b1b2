@@ -232,6 +232,10 @@ def create_offline_rl_trainer(
         verbose=True,
         log_interval=300,
         ## replay ##
+        # AMAGO v3.4.0 defaults to traj_save_len=1e10 (a float), which
+        # reaches random.randint() during SequenceWrapper.reset() and fails
+        # on Python 3.12. Supply the same length as a real integer.
+        traj_save_len=10_000_000_000,
         padded_sampling="none",
         dloader_workers=dloader_workers,
         ## learning schedule ##
