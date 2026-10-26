@@ -103,7 +103,14 @@ fi
 # Build directly from @pkmn/engine's *pinned npm source*. Its own installer
 # obtains Node headers if necessary; there is no separate git checkout.
 echo "Building pinned @pkmn/engine with -Dshowdown -Dlog..."
-node "${NPM_ENGINE}/src/bin/install-pkmn-engine" --options="-Dshowdown -Dlog"
+# Upstream install-pkmn-engine invokes Zig from the package root, but also
+# renames the compiled addon to the relative path build/lib/pkmn-showdown.node.
+# Invoking it from HOST_DIR makes that rename target the wrong directory and
+# raises ENOENT even if Zig finished successfully.
+(
+    cd "${NPM_ENGINE}"
+    node src/bin/install-pkmn-engine --options="-Dshowdown -Dlog"
+)
 
 if [ ! -s "${PKG_ADDON}" ]; then
     echo "ERROR: native build did not generate ${PKG_ADDON}" >&2
