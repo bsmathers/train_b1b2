@@ -11,6 +11,7 @@ on:
       - 'tests/test_native_legal.py'
       - 'metamon/env/vectorized/native_legal.py'
       - 'tests/test_native_input_contract.py'
+      - 'tests/test_native_base_model.py'
       - 'tests/native_sim_integration.cjs'
       - 'metamon/env/vectorized/native_choice.js'
       - 'metamon/env/vectorized/native_pov.js'
@@ -42,6 +43,8 @@ jobs:
           node-version: '20'
       - name: Native player-observation and legal-mask contract tests
         run: python -m unittest discover -s tests -p 'test_native_input_contract.py' -v
+      - name: TaurosV1 original starting-model loader tests
+        run: python -m unittest discover -s tests -p 'test_native_base_model.py' -v
       - name: Native automatic-turn mask contract tests
         run: python -m unittest discover -s tests -p 'test_native_legal.py' -v
       - name: Native locked-move request unit tests
