@@ -144,6 +144,11 @@ def run(args):
     )
     candidate_policy = candidate_exp.policy.to(device).eval()
     opponent_policy = opponent_exp.policy.to(device).eval()
+    # Policy actions are sampled, not argmax. Seed PyTorch after both model
+    # loads so the same test configuration has reproducible sampling streams.
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     candidate = AmagoBatchedOpponent(
         policy=candidate_policy,
         device=device,
