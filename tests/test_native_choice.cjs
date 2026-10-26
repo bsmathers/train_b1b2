@@ -10,17 +10,18 @@ const Choice = {
   switch(slot) { return { type: "switch", data: slot }; },
 };
 const side = {
+  slot(id) { return id; },
   active: { moves: [
     { id: "bodySlam" }, { id: "Earthquake" },
     { id: "Hyper Beam" }, { id: "Rest" },
   ] },
   pokemon: [
-    { stored: { species: "Tauros" } },
-    { stored: { species: "Snorlax" } },
-    { stored: { species: "Alakazam" } },
-    { stored: { species: "Chansey" } },
-    { stored: { species: "Exeggutor" } },
-    { stored: { species: "Starmie" } },
+    { position: 1, stored: { species: "Tauros" } },
+    { position: 2, stored: { species: "Snorlax" } },
+    { position: 3, stored: { species: "Alakazam" } },
+    { position: 4, stored: { species: "Chansey" } },
+    { position: 5, stored: { species: "Exeggutor" } },
+    { position: 6, stored: { species: "Starmie" } },
   ],
 };
 
@@ -31,11 +32,17 @@ test("all four numeric move slots round-trip to explicit legal Zig choices", () 
   }
 });
 
-test("all six 1-based party switch slots, including original lead, round-trip", () => {
-  for (let slot = 1; slot <= 6; slot++) {
-    const legal = [Choice.switch(slot)];
-    assert.deepEqual(resolveNativeChoice(`switch ${slot}`, legal, side, Choice), legal[0]);
+test("all six original party slots map to the current legal Zig slot", () => {
+  const shifted = { ...side, slot(id) { return id === 1 ? 2 : id === 2 ? 1 : id; } };
+  for (let original = 1; original <= 6; original++) {
+    const dynamic = original === 1 ? 2 : original === 2 ? 1 : original;
+    // Choice.switch(1) is never native-legal while that mon is active.
+    if (dynamic === 1) continue;
+    const legal = [Choice.switch(dynamic)];
+    assert.deepEqual(resolveNativeChoice(`switch ${original}`, legal, shifted, Choice), legal[0]);
   }
+  const legal = [Choice.switch(2)];
+  assert.deepEqual(resolveNativeChoice("switch 1", legal, shifted, Choice), legal[0]);
 });
 
 test("Metamon move and switch names preserve intended choices", () => {
@@ -46,13 +53,18 @@ test("Metamon move and switch names preserve intended choices", () => {
       legal[0]
     );
   }
-  for (let slot = 1; slot <= 6; slot++) {
+  for (let slot = 2; slot <= 6; slot++) {
     const legal = [Choice.switch(slot)];
     assert.deepEqual(
       resolveNativeChoice(`switch ${side.pokemon[slot - 1].stored.species}`, legal, side, Choice),
       legal[0]
     );
   }
+  const shifted = { ...side, slot(id) { return id === 1 ? 2 : id === 2 ? 1 : id; } };
+  assert.deepEqual(
+    resolveNativeChoice("switch Tauros", [Choice.switch(2)], shifted, Choice),
+    Choice.switch(2)
+  );
   assert.deepEqual(
     resolveNativeChoice("move Hyper Beam", [Choice.move(3)], side, Choice),
     Choice.move(3)
@@ -91,7 +103,7 @@ test("explicit default is the only permitted auto-choice", () => {
 
 test("duplicate species name is ambiguous and fails closed", () => {
   const duplicate = { ...side, pokemon: [
-    { stored: { species: "Tauros" } }, { stored: { species: "Tauros" } },
+    { position: 1, stored: { species: "Tauros" } }, { position: 2, stored: { species: "Tauros" } },
   ] };
   assert.throws(() => resolveNativeChoice("switch Tauros", [
     Choice.switch(1), Choice.switch(2),
