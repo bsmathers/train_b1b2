@@ -69,7 +69,12 @@ class SelectionTests(unittest.TestCase):
                 select.validate_manifest(directory, {"a": 2})
 
     def test_dry_run_interpolation_grid(self):
-        from metamon.rl.stage1_b2_select import generate_interpolations
+        spec_b2 = importlib.util.spec_from_file_location(
+            "stage1_b2", ROOT / "metamon" / "rl" / "stage1_b2_select.py"
+        )
+        b2 = importlib.util.module_from_spec(spec_b2)
+        spec_b2.loader.exec_module(b2)
+        generate_interpolations = b2.generate_interpolations
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
             base = root / "mediumg1online/ckpts/policy_weights"
