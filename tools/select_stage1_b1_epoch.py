@@ -161,7 +161,7 @@ def run_tournament(entries, output, args):
     valid = {r["matchup_id"] for r in existing
              if r.get("total_battles") == required.get(r["matchup_id"])}
     if not args.dry_run:
-        results_file.write_text("".join(json.dumps(r) + "\\n" for r in existing
+        results_file.write_text("".join(json.dumps(r) + "\n" for r in existing
                                         if r["matchup_id"] in valid))
         for matchup_id in required:
             if matchup_id not in valid:
