@@ -51,8 +51,17 @@ equal-weighted average of these four win rates; draws count as half a win.
 The per-condition scores are retained, and incomplete matches cannot select a
 winner.
 
-The existing local Showdown service must be running, and both participants
-must be able to connect to it. Tournament matches use the normal H2H runner.
+Checkpoint selection now runs **directly in the bundled Gen 1 Zig
+@pkmn/engine** via the existing vectorized battle host. No Showdown
+websocket server is involved. The native Node addon is built locally; on a
+fresh machine, run `./tools/setup_pkmn_engine.sh` once (it installs the
+matching Node dependencies and builds `pkmn-showdown.node`). The native
+runner refuses to fall back to slower Showdown or count partial results.
+
+The two policies share one GPU and make in-loop batched decisions over
+`--native-lanes 8` lanes by default. Each lane completes a fixed quota,
+so fast wins/losses cannot skew the set of games included. Side swaps remain
+separate matches. Worker logs go to `native.log` under each matchup directory.
 
 ```bash
 # The same checkpoint tree used by the B1 training launcher.
@@ -80,7 +89,7 @@ python tools/select_stage1_b1_epoch.py \
 uses the original archive instead of the bundled data, but the checked-in
 archive is sufficient on a fresh machine.
 
-Output files under `checkpoints/stage1_selection`:
+Output files under `checkpoints/stage1_selection_zig`:
 
 - `b1/candidate_scores.csv` and `b1/selected_epoch.json`
 - `b2/candidate_scores.csv` and `b2/selected_interpolation.json`
@@ -98,3 +107,24 @@ same `--output-dir`. Changing the matchup grid, replay collection, or number
 of battles requires a new output directory / B2 run name to avoid reusing
 stale evaluation results. The script selects checkpoint files, but does not
 begin further online or offline training.
+
+
+If B1 training stopped prematurely, run only the checkpoint sweep:
+
+```bash
+./tools/setup_pkmn_engine.sh  # once per machine; no server
+python tools/select_stage1_b1_epoch.py \
+  --mode b1 \
+  --gpus 0 \
+  --epochs 1 2 3 \
+  --battles-per-side 50 \
+  --native-lanes 8 \
+  --output-dir checkpoints/stage1_selection_zig
+```
+
+Omit `--epochs` to use all saved numbered B1 checkpoints. A worker failure
+prints a log path and leaves the matchup incomplete; fixing the issue and
+rerunning the same command resumes completed matches. For a short test
+use `--epochs 1 --battles-per-side 2 --output-dir checkpoints/zig_smoke`.
+`--transport showdown-server` remains available only as a legacy option,
+and must use a separate output directory from the native runner.
