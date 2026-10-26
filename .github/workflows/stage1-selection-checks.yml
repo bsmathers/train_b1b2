@@ -6,6 +6,10 @@ on:
       - 'tools/setup_pkmn_engine.sh'
       - 'tests/test_native_setup.py'
       - 'tests/test_native_choice.cjs'
+      - 'tests/test_native_locked_moves.cjs'
+      - 'tests/native_forced_integration.cjs'
+      - 'tests/test_native_legal.py'
+      - 'metamon/env/vectorized/native_legal.py'
       - 'tests/test_native_input_contract.py'
       - 'tests/native_sim_integration.cjs'
       - 'metamon/env/vectorized/native_choice.js'
@@ -38,6 +42,10 @@ jobs:
           node-version: '20'
       - name: Native player-observation and legal-mask contract tests
         run: python -m unittest discover -s tests -p 'test_native_input_contract.py' -v
+      - name: Native automatic-turn mask contract tests
+        run: python -m unittest discover -s tests -p 'test_native_legal.py' -v
+      - name: Native locked-move request unit tests
+        run: node --test tests/test_native_locked_moves.cjs
       - name: Native choice translation regression suite
         run: node --test tests/test_native_choice.cjs
       - name: Native two-POV request identity and order regression
@@ -46,3 +54,5 @@ jobs:
         run: ./tools/setup_pkmn_engine.sh
       - name: Real Zig simulation switch-back integration
         run: node tests/native_sim_integration.cjs
+      - name: Real Zig Hyper Beam and Rage locked-turn integration
+        run: node tests/native_forced_integration.cjs
