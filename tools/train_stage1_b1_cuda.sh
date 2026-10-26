@@ -89,7 +89,7 @@ if [ ! -f "${TAUROSV1_SAVE_DIR}/mediumg1online/ckpts/policy_weights/policy_epoch
 fi
 
 echo "Preparing bounded pac-tauros subset first (${PAC_TAUROS_TRAJECTORIES} trajectories)"
-"${PYTHON_BIN}" "${ROOT_DIR}/tools/prepare_pac_tauros_subset.py" \
+"${PYTHON_BIN}" -u "${ROOT_DIR}/tools/prepare_pac_tauros_subset.py" \
     --cache-dir "${METAMON_CACHE_DIR}" \
     --max-trajectories "${PAC_TAUROS_TRAJECTORIES}"
 

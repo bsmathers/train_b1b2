@@ -21,6 +21,11 @@ REPO_ID = "jakegrigsby/metamon-parsed-pile"
 SUBSET = "pac-tauros"
 FORMAT = "gen1ou"
 COMPLETE_MARKER = ".streamed_subset_complete.txt"
+PROGRESS_EVERY = 25_000
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
 
 
 def _safe_member_name(member: tarfile.TarInfo) -> PurePosixPath | None:
@@ -61,8 +66,8 @@ def _stream_reservoir(
             else:
                 slot = rng.randrange(seen)
                 if slot >= max_trajectories:
-                    if seen % 100_000 == 0:
-                        print(
+                    if seen % PROGRESS_EVERY == 0:
+                        _log(
                             f"pac-tauros stream: scanned {seen:,}; "
                             f"retained {len(selected):,}"
                         )
@@ -93,8 +98,8 @@ def _stream_reservoir(
                 selected.append(destination)
             selected_paths.add(destination)
 
-            if seen % 100_000 == 0:
-                print(
+            if seen % PROGRESS_EVERY == 0:
+                _log(
                     f"pac-tauros stream: scanned {seen:,}; "
                     f"retained {len(selected):,}"
                 )
@@ -137,7 +142,7 @@ def prepare_subset(
             f"Requested maximum: {max_trajectories}\n",
         )
         if all(line in marker_text for line in expected_lines):
-            print(f"Reusing bounded pac-tauros subset in {output_dir}")
+            _log(f"Reusing bounded pac-tauros subset in {output_dir}")
             _remove_obsolete_full_archive_files(dataset_root)
             return output_dir
         raise RuntimeError(
@@ -161,10 +166,10 @@ def prepare_subset(
     try:
         with ExitStack() as stack:
             if local_tar.is_file():
-                print(f"Sampling existing uncompressed archive {local_tar}")
+                _log(f"Sampling existing uncompressed archive {local_tar}")
                 decompressed = stack.enter_context(local_tar.open("rb"))
             elif local_lz4.is_file():
-                print(f"Streaming existing compressed archive {local_lz4}")
+                _log(f"Streaming existing compressed archive {local_lz4}")
                 decompressed = stack.enter_context(lz4.frame.open(local_lz4, "rb"))
             else:
                 url = hf_hub_url(
@@ -176,7 +181,7 @@ def prepare_subset(
                 headers = {}
                 if token := os.environ.get("HF_TOKEN"):
                     headers["Authorization"] = f"Bearer {token}"
-                print(
+                _log(
                     "Streaming pac-tauros directly from Hugging Face; "
                     "the compressed and full tar archives will not be stored"
                 )
@@ -184,6 +189,11 @@ def prepare_subset(
                     requests.get(url, headers=headers, stream=True, timeout=(30, 300))
                 )
                 response.raise_for_status()
+                content_length = response.headers.get("content-length", "unknown")
+                _log(
+                    "Connected to pac-tauros archive "
+                    f"(compressed bytes reported: {content_length})"
+                )
                 response.raw.decode_content = False
                 decompressed = stack.enter_context(lz4.frame.open(response.raw, "rb"))
 
@@ -207,7 +217,7 @@ def prepare_subset(
         )
         extracting.replace(output_dir)
         _remove_obsolete_full_archive_files(dataset_root)
-        print(
+        _log(
             f"Prepared {retained:,} uniformly sampled pac-tauros trajectories "
             f"from {seen:,} source trajectories in {output_dir}"
         )
