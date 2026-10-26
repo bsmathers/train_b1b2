@@ -9,6 +9,8 @@ on:
       - 'tests/test_native_input_contract.py'
       - 'tests/native_sim_integration.cjs'
       - 'metamon/env/vectorized/native_choice.js'
+      - 'metamon/env/vectorized/native_pov.js'
+      - 'tests/test_native_pov.cjs'
       - 'metamon/env/vectorized/battle_host_engine.js'
       - 'metamon/env/vectorized/vector_env.py'
       - 'metamon/env/vectorized/lane.py'
@@ -37,6 +39,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_native_input_contract.py' -v
       - name: Native choice translation regression suite
         run: node --test tests/test_native_choice.cjs
+      - name: Native two-POV request identity and order regression
+        run: node --test tests/test_native_pov.cjs
       - name: Build Zig native engine
         run: ./tools/setup_pkmn_engine.sh
       - name: Real Zig simulation switch-back integration
