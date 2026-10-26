@@ -3,6 +3,7 @@
 No Pokémon Showdown websocket/server. Two AMAGO policies act in the same
 VectorizedShowdownEnv, whose Gen 1 host uses the native Zig addon.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -97,12 +98,18 @@ def run(args):
     candidate_policy = candidate_exp.policy.to(device).eval()
     opponent_policy = opponent_exp.policy.to(device).eval()
     candidate = AmagoBatchedOpponent(
-        policy=candidate_policy, device=device, num_lanes=lanes,
-        action_dim=candidate_model.action_space.gym_space.n, sample=True,
+        policy=candidate_policy,
+        device=device,
+        num_lanes=lanes,
+        action_dim=candidate_model.action_space.gym_space.n,
+        sample=True,
     )
     opponent = AmagoBatchedOpponent(
-        policy=opponent_policy, device=device, num_lanes=lanes,
-        action_dim=opponent_model.action_space.gym_space.n, sample=True,
+        policy=opponent_policy,
+        device=device,
+        num_lanes=lanes,
+        action_dim=opponent_model.action_space.gym_space.n,
+        sample=True,
     )
     env = VectorizedShowdownEnv(
         player_team_set=get_metamon_teams("gen1ou", args.candidate_team),
@@ -152,9 +159,11 @@ def run(args):
                 scores.append(finish_score(True, truncated, info, int(i)))
                 counts[i] += 1
             candidate.reset_lanes(done)
-            if len(scores) and (
-                len(scores) % 10 == 0 or len(scores) == args.battles
-            ) and getattr(run, "_last_printed", None) != len(scores):
+            if (
+                len(scores)
+                and (len(scores) % 10 == 0 or len(scores) == args.battles)
+                and getattr(run, "_last_printed", None) != len(scores)
+            ):
                 print(
                     f"[native] {len(scores)}/{args.battles} battles finished, "
                     f"score={sum(scores) / len(scores):.3f}",

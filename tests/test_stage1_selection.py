@@ -109,12 +109,11 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(
             native.finish_score(
                 True, trunc, {"won": [False, True], "draw": [True, False]}, 0
-            ), 0.5
+            ),
+            0.5,
         )
         self.assertEqual(
-            native.finish_score(
-                True, [True], {"won": [False], "draw": [True]}, 0
-            ), 0.5
+            native.finish_score(True, [True], {"won": [False], "draw": [True]}, 0), 0.5
         )
         with self.assertRaises(ValueError):
             native.finish_score(False, [False], {"won": [True]}, 0)

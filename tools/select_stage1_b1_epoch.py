@@ -191,6 +191,7 @@ def run_native_tournament(entries, output, args):
     if not args.dry_run:
         import shutil as _shutil
         from metamon.rl.evaluate.native_matchup import require_native_engine
+
         if _shutil.which("node") is None:
             raise RuntimeError("Node.js not found; run ./tools/setup_pkmn_engine.sh")
         require_native_engine()
@@ -244,20 +245,30 @@ def run_native_tournament(entries, output, args):
             # torch.compile path known to fail for this AMAGO configuration.
             env.setdefault("TORCHDYNAMO_DISABLE", "1")
             cmd = [
-                sys.executable, "-u", "-m",
+                sys.executable,
+                "-u",
+                "-m",
                 "metamon.rl.evaluate.native_matchup",
-                "--model", model,
-                "--checkpoint", str(checkpoint),
+                "--model",
+                model,
+                "--checkpoint",
+                str(checkpoint),
                 "--candidate-team",
                 "b1_good_807" if own == "good" else "hl_05_26",
                 "--opponent-team",
                 "b1_good_807" if other == "good" else "hl_05_26",
-                "--side", str(int(reverse)),
-                "--battles", str(spec.n_battles),
-                "--lanes", str(args.native_lanes),
-                "--workers", str(args.native_workers),
-                "--seed", str(args.seed),
-                "--output", str(result_path.resolve()),
+                "--side",
+                str(int(reverse)),
+                "--battles",
+                str(spec.n_battles),
+                "--lanes",
+                str(args.native_lanes),
+                "--workers",
+                str(args.native_workers),
+                "--seed",
+                str(args.seed),
+                "--output",
+                str(result_path.resolve()),
             ]
             print(
                 f"Starting {candidate}: {own}/{other}, "
@@ -267,7 +278,10 @@ def run_native_tournament(entries, output, args):
             )
             with log_path.open("w") as log:
                 proc = subprocess.Popen(
-                    cmd, env=env, cwd=str(ROOT), stdout=log,
+                    cmd,
+                    env=env,
+                    cwd=str(ROOT),
+                    stdout=log,
                     stderr=subprocess.STDOUT,
                 )
                 start = time.monotonic()
@@ -294,7 +308,10 @@ def run_native_tournament(entries, output, args):
                         f"results. See {log_path}"
                     )
             data = json.loads(result_path.read_text())
-            if data.get("engine") != "zig-pkmn" or data.get("battles") != spec.n_battles:
+            if (
+                data.get("engine") != "zig-pkmn"
+                or data.get("battles") != spec.n_battles
+            ):
                 raise ValueError(f"Incomplete or invalid worker result: {result_path}")
             wins = int(data["candidate_wins"])
             losses = int(data["opponent_wins"])
@@ -302,6 +319,7 @@ def run_native_tournament(entries, output, args):
             if min(wins, losses, draws) < 0 or wins + losses + draws != spec.n_battles:
                 raise ValueError(f"Invalid win/loss/draw counts in {result_path}")
             from datetime import datetime
+
             return MatchupResult(
                 matchup_id=spec.matchup_id,
                 policy_a_name=spec.policy_a.short_label,
@@ -415,7 +433,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("b1", "b2", "both"), default="both")
     parser.add_argument(
-        "--transport", choices=("native", "showdown-server"), default="native",
+        "--transport",
+        choices=("native", "showdown-server"),
+        default="native",
         help="Native Zig battle host (default) or legacy websocket server.",
     )
     parser.add_argument("--native-lanes", type=int, default=8)
