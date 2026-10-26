@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'tools/select_stage1_b1_epoch.py'
+      - 'tools/setup_pkmn_engine.sh'
       - 'metamon/rl/stage1_b2_select.py'
       - 'artifacts/good_teams_807.bz2.base64'
       - 'tests/test_stage1_selection.py'
@@ -17,4 +18,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: bash -n tools/setup_pkmn_engine.sh
       - run: python -m unittest discover -s tests -p 'test_stage1_selection.py' -v

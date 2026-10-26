@@ -1,128 +1,118 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Setup script for @pkmn/engine native Zig build (Linux/macOS)
-# Builds pkmn-showdown.node with -Dshowdown -Dlog for 50x faster battle simulation.
+# Build the pinned @pkmn/engine N-API addon used by the Gen 1 tournament.
+# No Showdown server, apt dist-upgrade, git clone, or Zig tarball from ziglang.org.
+# The npm lockfile pins the Zig source/JS ABI. Python's ziglang wheel supplies
+# Zig 0.16.0 when it is not already installed.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST_DIR="${ROOT_DIR}/metamon/env/vectorized"
+ADDON="${HOST_DIR}/pkmn-showdown.node"
+NPM_ENGINE="${HOST_DIR}/node_modules/@pkmn/engine"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PKMN_DIR="${ROOT_DIR}/pkmn-engine"
-PKMN_ENGINE_REF="${PKMN_ENGINE_REF:-78dc891c}"
+echo "=== Native Gen 1 (@pkmn/engine Zig) setup ==="
 
-echo "=== Metamon @pkmn/engine Setup ==="
-
-# 0. Check or install Node.js / npm
-if [ -d "${ROOT_DIR}/.node/bin" ]; then
-    export PATH="${ROOT_DIR}/.node/bin:${PATH}"
-fi
-
-if command -v node &> /dev/null && command -v npm &> /dev/null; then
-    echo "Found Node.js: $(node --version)"
-    echo "Found npm:     $(npm --version)"
-else
-    echo "Node.js or npm not found in PATH."
-    if command -v apt-get &> /dev/null && [ "$(id -u)" -eq 0 ]; then
-        echo "Installing Node.js 20 LTS via apt..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
-    else
-        echo "Downloading standalone Node.js Linux x86_64 binary..."
-        NODE_VER="v20.18.0"
-        NODE_TAR="node-${NODE_VER}-linux-x64.tar.xz"
-        curl -L "https://nodejs.org/dist/${NODE_VER}/${NODE_TAR}" -o "/tmp/${NODE_TAR}"
-        mkdir -p "${ROOT_DIR}/.node"
-        tar -xf "/tmp/${NODE_TAR}" -C "${ROOT_DIR}/.node" --strip-components=1
-        rm "/tmp/${NODE_TAR}"
-        export PATH="${ROOT_DIR}/.node/bin:${PATH}"
-    fi
-    echo "Installed Node.js: $(node --version)"
-fi
-
-# 1. Check or install Zig (pkmn/engine requires Zig >= 0.16.0)
-if [ -d "${ROOT_DIR}/.zig" ]; then
-    export PATH="${ROOT_DIR}/.zig:${PATH}"
-fi
-
-NEED_ZIG=1
-if command -v zig &> /dev/null; then
-    CURRENT_ZIG=$(zig version)
-    echo "Found Zig: ${CURRENT_ZIG}"
-    MAJOR=$(echo "${CURRENT_ZIG}" | cut -d. -f1)
-    MINOR=$(echo "${CURRENT_ZIG}" | cut -d. -f2)
-    if [ "${MAJOR}" -gt 0 ] || [ "${MINOR}" -ge 16 ]; then
-        NEED_ZIG=0
-    else
-        echo "Zig ${CURRENT_ZIG} is too old (pkmn/engine requires >= 0.16.0). Upgrading..."
-    fi
-fi
-
-if [ "${NEED_ZIG}" -eq 1 ]; then
-    echo "Downloading standalone Zig 0.16.0..."
-    OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    ARCH="$(uname -m)"
-    if [ "${ARCH}" = "x86_64" ]; then
-        ZIG_ARCH="x86_64"
-    elif [ "${ARCH}" = "arm64" ] || [ "${ARCH}" = "aarch64" ]; then
-        ZIG_ARCH="aarch64"
-    else
-        ZIG_ARCH="${ARCH}"
-    fi
-
-    if [ "${OS}" = "darwin" ]; then
-        ZIG_OS="macos"
-    else
-        ZIG_OS="linux"
-    fi
-
-    ZIG_VERSION="0.16.0"
-    ZIG_TAR="zig-${ZIG_ARCH}-${ZIG_OS}-${ZIG_VERSION}.tar.xz"
-    ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TAR}"
-
-    rm -rf "${ROOT_DIR}/.zig"
-    mkdir -p "${ROOT_DIR}/.zig"
-    curl -L "${ZIG_URL}" -o "/tmp/${ZIG_TAR}"
-    tar -xf "/tmp/${ZIG_TAR}" -C "${ROOT_DIR}/.zig" --strip-components=1
-    rm "/tmp/${ZIG_TAR}"
-    export PATH="${ROOT_DIR}/.zig:${PATH}"
-    echo "Installed Zig: $(zig version)"
-fi
-
-# 2. Clone pkmn/engine if needed, then build the exact revision used by the
-# pinned JavaScript package. Mixing a newer native ABI with an older wrapper
-# can fail at startup or corrupt simulator results.
-if [ ! -d "${PKMN_DIR}" ]; then
-    echo "Cloning pkmn/engine..."
-    git clone --no-checkout --filter=blob:none https://github.com/pkmn/engine.git "${PKMN_DIR}"
-fi
-
-cd "${PKMN_DIR}"
-git fetch --filter=blob:none origin
-git checkout --detach "${PKMN_ENGINE_REF}"
-
-# 3. Build native addon with -Dshowdown -Dlog
-echo "Building @pkmn/engine native addon (-Dshowdown -Dlog)..."
-node src/bin/install-pkmn-engine --options="-Dshowdown -Dlog"
-
-# 4. Install npm dependencies in vectorized env
-echo "Setting up Node.js packages..."
-cd "${ROOT_DIR}/metamon/env/vectorized"
-npm ci --legacy-peer-deps
-
-if [ -f "${ROOT_DIR}/metamon/env/vectorized/pkmn_engine_common.js" ]; then
-    mkdir -p "${ROOT_DIR}/metamon/env/vectorized/node_modules/@pkmn/engine/build/pkg"
-    cp "${ROOT_DIR}/metamon/env/vectorized/pkmn_engine_common.js" "${ROOT_DIR}/metamon/env/vectorized/node_modules/@pkmn/engine/build/pkg/common.js"
-fi
-
-# 5. Link built addon into vectorized env
-if [ -f "${PKMN_DIR}/zig-out/lib/pkmn-showdown.node" ]; then
-    cp "${PKMN_DIR}/zig-out/lib/pkmn-showdown.node" "${ROOT_DIR}/metamon/env/vectorized/"
-    echo "Successfully built and copied pkmn-showdown.node to metamon/env/vectorized/"
-elif [ -f "${PKMN_DIR}/build/lib/pkmn-showdown.node" ]; then
-    cp "${PKMN_DIR}/build/lib/pkmn-showdown.node" "${ROOT_DIR}/metamon/env/vectorized/"
-    echo "Successfully built and copied pkmn-showdown.node to metamon/env/vectorized/"
-else
-    echo "ERROR: the @pkmn/engine build completed without producing pkmn-showdown.node"
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "ERROR: Node.js and npm are required. Install Node.js 20+ and rerun." >&2
     exit 1
 fi
+echo "Node: $(node --version); npm: $(npm --version)"
 
-echo "=== @pkmn/engine setup complete! ==="
+cd "${HOST_DIR}"
+
+# Install from the exact repository lockfile without invoking the package's
+# postinstall (which otherwise downloads Zig again from ziglang.org).
+if [ ! -f "${NPM_ENGINE}/src/bin/install-pkmn-engine" ]; then
+    echo "Installing pinned Node dependencies (skipping implicit Zig download)..."
+    npm ci --ignore-scripts --no-audit --no-fund --legacy-peer-deps
+fi
+
+# The pinned npm package's driver resolves ./build/pkg/common.js. Retain the
+# repo-specific adapter. npm ci may remove it, so repair before any require().
+mkdir -p "${NPM_ENGINE}/build/pkg"
+cp "${HOST_DIR}/pkmn_engine_common.js" "${NPM_ENGINE}/build/pkg/common.js"
+
+verify_addon() {
+    local path="$1"
+    [ -s "$path" ] || return 1
+    node - "$path" <<'NODE'
+const path = require('path');
+(async () => {
+  const file = path.resolve(process.argv[2]);
+  const native = require(file);
+  if (!native?.engine?.options?.showdown || !native?.engine?.options?.log) {
+    throw new Error('addon must be compiled with -Dshowdown -Dlog');
+  }
+  const engine = require('@pkmn/engine');
+  if (typeof engine.initialize !== 'function') {
+    throw new Error('pinned @pkmn/engine does not expose initialize()');
+  }
+  await engine.initialize(true, file);
+  console.log('Verified native Zig addon (Showdown-compatible Gen 1, logging enabled)');
+})().catch(error => {
+  console.error('Native addon validation:', error.message);
+  process.exitCode = 1;
+});
+NODE
+}
+
+# Most restarts should stop right here; neither Python nor Zig is installed.
+if verify_addon "${ADDON}"; then
+    echo "Native engine is ready; nothing to install or rebuild."
+    exit 0
+fi
+
+# npm's installer can already have produced the correctly configured addon.
+PKG_ADDON="${NPM_ENGINE}/build/lib/pkmn-showdown.node"
+if verify_addon "${PKG_ADDON}"; then
+    cp "${PKG_ADDON}" "${ADDON}"
+    echo "Reused the existing Zig addon from the npm package."
+    exit 0
+fi
+
+# Reuse an existing Zig 0.16.0 compiler before fetching anything.
+if [ -x "${ROOT_DIR}/.zig/zig" ]; then
+    export PATH="${ROOT_DIR}/.zig:${PATH}"
+fi
+if [ "$(zig version 2>/dev/null || true)" = "0.16.0" ]; then
+    echo "Using existing Zig 0.16.0: $(command -v zig)"
+else
+    # The PyPI wheel is maintained by Zig's developers and uses the configured
+    # pip index rather than the very slow ziglang.org tarball endpoint.
+    if ! "${PYTHON_BIN}" -m ziglang version 2>/dev/null | grep -qx '0.16.0'; then
+        echo "Installing Zig 0.16.0 from PyPI (one-time, via configured pip mirror)..."
+        "${PYTHON_BIN}" -m pip install --disable-pip-version-check \
+            --retries 2 --timeout 30 "ziglang==0.16.0"
+    fi
+    if ! "${PYTHON_BIN}" -m ziglang version 2>/dev/null | grep -qx '0.16.0'; then
+        echo "ERROR: Zig 0.16.0 missing; try: ${PYTHON_BIN} -m pip install ziglang==0.16.0" >&2
+        exit 1
+    fi
+    mkdir -p "${ROOT_DIR}/.zig"
+    PYTHON_PATH="$(command -v "${PYTHON_BIN}")"
+    printf '#!/bin/sh\nexec "%s" -m ziglang "$@"\n' "${PYTHON_PATH}" > "${ROOT_DIR}/.zig/zig"
+    chmod +x "${ROOT_DIR}/.zig/zig"
+    export PATH="${ROOT_DIR}/.zig:${PATH}"
+fi
+[ "$(zig version)" = "0.16.0" ] || {
+    echo "ERROR: expected Zig 0.16.0; got $(zig version)" >&2
+    exit 1
+}
+
+# Build directly from @pkmn/engine's *pinned npm source*. Its own installer
+# obtains Node headers if necessary; there is no separate git checkout.
+echo "Building pinned @pkmn/engine with -Dshowdown -Dlog..."
+node "${NPM_ENGINE}/src/bin/install-pkmn-engine" --options="-Dshowdown -Dlog"
+
+if [ ! -s "${PKG_ADDON}" ]; then
+    echo "ERROR: native build did not generate ${PKG_ADDON}" >&2
+    exit 1
+fi
+cp "${PKG_ADDON}" "${ADDON}"
+verify_addon "${ADDON}" || {
+    rm -f "${ADDON}"
+    echo "ERROR: generated addon failed native initialization checks." >&2
+    exit 1
+}
+echo "Native Zig simulator ready. No Showdown websocket server needed."
