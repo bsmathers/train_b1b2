@@ -6,6 +6,7 @@ on:
       - 'tools/setup_pkmn_engine.sh'
       - 'tests/test_native_setup.py'
       - 'tests/test_native_choice.cjs'
+      - 'tests/test_native_input_contract.py'
       - 'tests/native_sim_integration.cjs'
       - 'metamon/env/vectorized/native_choice.js'
       - 'metamon/env/vectorized/battle_host_engine.js'
@@ -32,6 +33,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Native player-observation and legal-mask contract tests
+        run: python -m unittest discover -s tests -p 'test_native_input_contract.py' -v
       - name: Native choice translation regression suite
         run: node --test tests/test_native_choice.cjs
       - name: Build Zig native engine
