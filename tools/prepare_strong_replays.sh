@@ -15,6 +15,7 @@ STRONG_REPLAYS_ARCHIVE="${STRONG_REPLAYS_ARCHIVE:-${GOOD_REPLAYS_DIR%/}.gen1ou.z
 if [[ -d "${GOOD_REPLAYS_DIR}/gen1ou" ]] \
     && find "${GOOD_REPLAYS_DIR}/gen1ou" -maxdepth 1 -type f \
       \( -name '*.json' -o -name '*.json.lz4' \) -print -quit | grep -q .; then
+  rm -f "${STRONG_REPLAYS_ARCHIVE}" "${STRONG_REPLAYS_ARCHIVE}.partial"
   log "Reusing strong-model trajectories in ${GOOD_REPLAYS_DIR}/gen1ou"
   exit 0
 fi
@@ -90,6 +91,7 @@ try:
     if output_root.exists():
         shutil.rmtree(output_root)
     extract_root.replace(output_root)
+    archive.unlink(missing_ok=True)
 except BaseException:
     shutil.rmtree(extract_root, ignore_errors=True)
     raise

@@ -33,6 +33,7 @@ dependencies = [
   "termcolor",
   "rich",
   "huggingface_hub",
+  "requests",
   "datasets",
   "ratarmountcore",
   "poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git",

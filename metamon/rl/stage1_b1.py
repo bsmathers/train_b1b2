@@ -443,6 +443,16 @@ def _restore_best_state(experiment, policy, training_path: Path):
     experiment.lr_schedule.load_state_dict(training_state["lr_schedule"])
 
 
+def _save_numbered_policy(experiment, policy, epoch: int, interval: int | None):
+    if not interval or epoch % interval != 0:
+        return
+    if experiment.accelerator.is_main_process:
+        _atomic_torch_save(
+            policy.state_dict(),
+            Path(experiment.ckpt_dir) / "policy_weights" / f"policy_epoch_{epoch}.pt",
+        )
+
+
 def run_staged_b1(
     experiment,
     validation_dataset,
@@ -470,6 +480,13 @@ def run_staged_b1(
         generator=torch.Generator().manual_seed(validation_seed),
     )
     loader = experiment.accelerator.prepare(loader)
+    # AMAGO's normal checkpoint duplicates policy weights inside a full
+    # Accelerate state that this staged pipeline intentionally cannot resume.
+    # Keep its interval for lightweight tournament policies, while best-state
+    # bundles below retain the matching optimizer and scheduler needed within
+    # the current run.
+    numbered_policy_interval = experiment.ckpt_interval
+    experiment.ckpt_interval = None
     phase_specs = (
         (1, "value_head", phase1_epochs, phase1_patience),
         (2, "value_backbone", phase2_epochs, phase2_patience),
@@ -509,6 +526,9 @@ def run_staged_b1(
             experiment.epoch = global_epoch
             experiment.epochs = global_epoch + 1
             experiment.learn()
+            _save_numbered_policy(
+                experiment, policy, global_epoch, numbered_policy_interval
+            )
             metric, metrics = _validate(
                 experiment,
                 loader,
@@ -560,3 +580,4 @@ def run_staged_b1(
     experiment.accelerator.wait_for_everyone()
     experiment.epoch = global_epoch
     experiment.epochs = global_epoch
+    experiment.ckpt_interval = numbered_policy_interval

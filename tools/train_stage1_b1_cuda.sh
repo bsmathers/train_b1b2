@@ -25,6 +25,8 @@ BATCH_SIZE="${BATCH_SIZE:-12}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 DLOADER_WORKERS="${DLOADER_WORKERS:-8}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+PAC_TAUROS_TRAJECTORIES="${PAC_TAUROS_TRAJECTORIES:-250000}"
+CKPT_INTERVAL="${CKPT_INTERVAL:-10}"
 
 mkdir -p "${METAMON_CACHE_DIR}" "${SAVE_DIR}"
 cd "${ROOT_DIR}"
@@ -86,13 +88,17 @@ if [ ! -f "${TAUROSV1_SAVE_DIR}/mediumg1online/ckpts/policy_weights/policy_epoch
     "${PYTHON_BIN}" "${ROOT_DIR}/tools/assemble_epoch475.py" --repo-root "${ROOT_DIR}"
 fi
 
+echo "Preparing bounded pac-tauros subset first (${PAC_TAUROS_TRAJECTORIES} trajectories)"
+"${PYTHON_BIN}" "${ROOT_DIR}/tools/prepare_pac_tauros_subset.py" \
+    --cache-dir "${METAMON_CACHE_DIR}" \
+    --max-trajectories "${PAC_TAUROS_TRAJECTORIES}"
+
+echo "Preparing Gen1 OU human replay dataset"
+"${PYTHON_BIN}" -m metamon.data.download parsed-replays --formats gen1ou
+
 if [ ! -d "${GOOD_REPLAYS_DIR}/gen1ou" ] && [ ! -f "${GOOD_REPLAYS_DIR}/gen1ou.tar" ]; then
     "${ROOT_DIR}/tools/prepare_strong_replays.sh"
 fi
-
-echo "Preparing Gen1 OU human and pac-tauros replay datasets"
-"${PYTHON_BIN}" -m metamon.data.download parsed-replays --formats gen1ou
-"${PYTHON_BIN}" -m metamon.data.download self-play --subsets pac-tauros --formats gen1ou
 
 LOG_ARG=""
 if [ -n "${WANDB_API_KEY:-}" ]; then
@@ -114,7 +120,7 @@ exec "${PYTHON_BIN}" -m metamon.rl.finetune \
     --mixed_precision "${MIXED_PRECISION}" \
     --dloader_workers "${DLOADER_WORKERS}" \
     --async_env_mp_context spawn \
-    --ckpt_interval 1 \
+    --ckpt_interval "${CKPT_INTERVAL}" \
     --validation_fraction 0.10 \
     --validation_batches 50 \
     --validation_seed 42 \

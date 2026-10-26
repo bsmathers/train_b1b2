@@ -13,6 +13,7 @@ from metamon.rl.stage1_b1 import (
     Stage1B1Agent,
     _restore_best_state,
     _save_best_state,
+    _save_numbered_policy,
 )
 
 
@@ -102,6 +103,23 @@ class Stage1B1StateTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(Stage1B1Agent._l2sp(fake).detach()), 20.0 / 17.0
         )
+
+    def test_numbered_policy_respects_interval_without_training_state(self):
+        policy = nn.Linear(2, 1, bias=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            experiment = SimpleNamespace(
+                accelerator=_Accelerator(),
+                ckpt_dir=tmp,
+            )
+            _save_numbered_policy(experiment, policy, epoch=9, interval=10)
+            self.assertFalse(
+                (Path(tmp) / "policy_weights" / "policy_epoch_9.pt").exists()
+            )
+            _save_numbered_policy(experiment, policy, epoch=10, interval=10)
+            self.assertTrue(
+                (Path(tmp) / "policy_weights" / "policy_epoch_10.pt").is_file()
+            )
+            self.assertFalse((Path(tmp) / "training_states").exists())
 
 
 if __name__ == "__main__":

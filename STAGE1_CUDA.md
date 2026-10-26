@@ -8,6 +8,19 @@ Python dependencies, and downloads the required Gen1 OU datasets:
 - 40% human parsed trajectories from `jakegrigsby/metamon-parsed-replays`;
 - 10% `pac-tauros` from `jakegrigsby/metamon-parsed-pile`.
 
+For low-disk machines, the launcher processes pac-tauros first and streams its
+compressed tar directly from Hugging Face. It retains a deterministic uniform
+reservoir of 250,000 trajectories and never writes the full decompressed tar.
+The dataset's training mixture weight remains 10%; only its on-disk diversity is
+bounded. Set `PAC_TAUROS_TRAJECTORIES` to change this bound. Completed
+strong-replay archives are also removed after extraction.
+
+Policy-only numbered checkpoints default to every 10 epochs to keep a long run
+within the disk budget; the redundant AMAGO Accelerate-state history is disabled
+for this non-resumable staged pipeline. Validation-best snapshots still save
+matching policy, optimizer, and scheduler state immediately. Set `CKPT_INTERVAL`
+to override the numbered-policy interval.
+
 `HF_TOKEN` is optional for these public datasets. Downloads and extracted data
 are reused from `cache/` on later launches.
 

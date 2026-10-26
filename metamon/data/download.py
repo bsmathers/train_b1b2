@@ -300,6 +300,12 @@ def download_self_play_data(
     tar_path = os.path.join(self_play_dir, f"{battle_format}.tar")
     extracted_path = os.path.join(self_play_dir, battle_format)
 
+    # Low-disk launchers can stream a bounded subset directly into the normal
+    # extracted-directory layout. Prefer it over downloading the multi-million
+    # trajectory tar again when SelfPlayDataset initializes with extract=False.
+    if os.path.isdir(extracted_path) and not force_download:
+        return extracted_path
+
     # Determine output path based on extract flag
     out_path = extracted_path if extract else tar_path
 
