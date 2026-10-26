@@ -403,7 +403,7 @@ def main():
     parser.add_argument("--run-name", default="stage1_b1")
     parser.add_argument("--b2-run-name", default="stage1_b2_selection")
     parser.add_argument(
-        "--output-dir", type=Path, default=ROOT / "checkpoints" / "stage1_selection"
+        "--output-dir", type=Path, default=ROOT / "checkpoints" / "stage1_selection_zig"
     )
     parser.add_argument("--cache-dir", type=Path, default=ROOT / "cache")
     parser.add_argument(
