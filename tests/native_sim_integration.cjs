@@ -11,6 +11,7 @@ const data = require(path.join(host, "node_modules/@pkmn/data"));
 const sim = require(path.join(host, "node_modules/@pkmn/sim"));
 const { resolveNativeChoice } = require(path.join(host, "native_choice.js"));
 const { originalPartyOrder, privateIdent } = require(path.join(host, "native_pov.js"));
+const { createEngineRequest } = require(path.join(host, "native_request.js"));
 
 const roster = [
   ["Tauros", ["Body Slam", "Earthquake", "Blizzard", "Hyper Beam"]],
@@ -72,6 +73,40 @@ const sets = roster.map(([species, moves]) => ({
   }
   assertChoiceParity("p1");
   assertChoiceParity("p2");
+  function assertPrivateRequests() {
+    for (const sideId of ["p1", "p2"]) {
+      const expected = battle.side(sideId);
+      const request = createEngineRequest(
+        battle, gen1, sideId, sideId, res, decoded
+      );
+      if (res.type) {
+        assert.equal(request, null);
+        continue;
+      }
+      assert.equal(request.side.id, sideId);
+      const original = originalPartyOrder(expected);
+      assert.deepEqual(
+        request.side.pokemon.map(p => p.ident),
+        original.map(p => privateIdent(sideId, p, decoded, p.stored.species))
+      );
+      assert.deepEqual(
+        request.side.pokemon.map(p => p.active),
+        original.map(p => p.active)
+      );
+      assert.deepEqual(
+        request.side.pokemon.map(p => p.moves),
+        original.map(p => Array.from(p.stored.moves).map(m => m.id))
+      );
+      if (res[sideId] === "move") {
+        assert.equal(request.active.length, 1);
+        assert.deepEqual(
+          request.active[0].moves.map(m => m.id),
+          Array.from(expected.active.moves).map(m => m.id)
+        );
+      }
+    }
+  }
+  assertPrivateRequests();
 
   // Verify a *real* native engine accepts both the party slot and move
   // conventions. Switch out of the lead, then switch back into party slot 1.
@@ -84,6 +119,7 @@ const sets = roster.map(([species, moves]) => ({
   res = battle.update(switch2, other);
   assertChoiceParity("p1");
   assertChoiceParity("p2");
+  assertPrivateRequests();
 
   // Zig keeps the active mon in CURRENT slot 1. Its Side.slot(originalId)
   // translates a stable Showdown party position to the native 2..6 slot.
@@ -108,6 +144,7 @@ const sets = roster.map(([species, moves]) => ({
   res = battle.update(switch1, c2);
   assertChoiceParity("p1");
   assertChoiceParity("p2");
+  assertPrivateRequests();
 
   let steps = 2;
   for (; steps < 18 && !res.type; steps++) {
