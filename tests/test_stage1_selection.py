@@ -91,6 +91,20 @@ class SelectionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 select.validate_manifest(directory, {"a": 2})
 
+    def test_native_log_tail_includes_real_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "native.log"
+            self.assertIn("could not read", select.native_log_tail(path))
+            path.write_text(
+                "boot\npreflight\nTraceback (most recent call last):\n"
+                "RuntimeError: native choice mismatch\n"
+            )
+            text = select.native_log_tail(path)
+            self.assertIn("RuntimeError: native choice mismatch", text)
+            self.assertIn("Traceback", text)
+            self.assertNotIn("boot", select.native_log_tail(path, max_lines=2))
+            self.assertIn("no log output", select.native_log_tail(path, max_bytes=0))
+
     def test_native_outcome_scoring(self):
         # Score draws and turn-limit truncations as half a point; not losses.
         native_spec = importlib.util.spec_from_file_location(
