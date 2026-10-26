@@ -32,6 +32,10 @@ def require_native_engine() -> None:
     os.environ["METAMON_BATTLE_HOST"] = str(host_dir / "battle_host_engine.js")
     os.environ["METAMON_PKMN_ENGINE"] = str(native.resolve())
     os.environ["METAMON_REQUIRE_PKMN_ENGINE"] = "1"
+    # Fail rather than scoring model actions silently repaired by an adapter.
+    # Parser errors must not discard historical battle events during selection.
+    os.environ.setdefault("METAMON_NATIVE_STRICT_ACTIONS", "1")
+    os.environ.setdefault("METAMON_NATIVE_STRICT_PARSER", "1")
 
 
 def get_candidate_model(model_name: str, checkpoint: int):
