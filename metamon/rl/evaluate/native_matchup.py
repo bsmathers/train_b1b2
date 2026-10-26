@@ -266,7 +266,9 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", choices=("Stage1B1", "Stage1B2", "TaurosV1"), required=True)
+    p.add_argument(
+        "--model", choices=("Stage1B1", "Stage1B2", "TaurosV1"), required=True
+    )
     p.add_argument("--checkpoint", type=int, required=True)
     p.add_argument("--candidate-team", required=True)
     p.add_argument("--opponent-team", required=True)

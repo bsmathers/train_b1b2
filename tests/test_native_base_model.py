@@ -1,4 +1,5 @@
 """Check the native TaurosV1 starting-weight baseline without downloading weights."""
+
 import importlib.util
 import os
 from pathlib import Path
@@ -53,11 +54,14 @@ class NativeBaseModelTests(unittest.TestCase):
         fake.TaurosV1 = FakeTaurosV1
         fake.get_pretrained_model = lambda model: ("pretrained", model)
         with patch.dict(sys.modules, {"metamon.rl.pretrained": fake}):
-            with patch.dict(os.environ, {
-                "TAUROSV1_SAVE_DIR": "/tmp/original",
-                "B1_SAVE_DIR": "/tmp/finetuned",
-                "B1_RUN_NAME": "stage1_b1",
-            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "TAUROSV1_SAVE_DIR": "/tmp/original",
+                    "B1_SAVE_DIR": "/tmp/finetuned",
+                    "B1_RUN_NAME": "stage1_b1",
+                },
+            ):
                 base = native.get_candidate_model("TaurosV1", 475)
                 b1 = native.get_candidate_model("Stage1B1", 1)
                 self.assertEqual(base.options["model_name"], "mediumg1online")
@@ -65,8 +69,7 @@ class NativeBaseModelTests(unittest.TestCase):
                 self.assertEqual(b1.options["model_name"], "stage1_b1")
                 self.assertEqual(b1.options["amago_ckpt_dir"], "/tmp/finetuned")
                 self.assertEqual(
-                    base.options["model_gin_config"],
-                    b1.options["model_gin_config"]
+                    base.options["model_gin_config"], b1.options["model_gin_config"]
                 )
 
 
