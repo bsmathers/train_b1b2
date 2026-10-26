@@ -149,6 +149,25 @@ def run_tournament(entries, output, args):
         "matchups": [r[-1].matchup_id for r in entries],
     }
     validate_manifest(output, manifest)
+    # The generic H2H tracker considers any nonempty battle log complete.
+    # For model selection, partially completed bouts must be retried, and
+    # prior CSVs must not be appended to on retries.
+    results_file = output / "matchup_results.jsonl"
+    existing = []
+    if results_file.exists():
+        existing = [json.loads(line) for line in results_file.read_text().splitlines()
+                    if line.strip()]
+    required = {e[-1].matchup_id: e[-1].n_battles for e in entries}
+    valid = {r["matchup_id"] for r in existing
+             if r.get("total_battles") == required.get(r["matchup_id"])}
+    if not args.dry_run:
+        results_file.write_text("".join(json.dumps(r) + "\\n" for r in existing
+                                        if r["matchup_id"] in valid))
+        for matchup_id in required:
+            if matchup_id not in valid:
+                partial_dir = output / matchup_id
+                if partial_dir.is_dir():
+                    shutil.rmtree(partial_dir)
     if args.dry_run:
         print(f"Would run {len(entries)} matchups, {args.battles_per_side} battles each")
         for _, _, _, _, spec in entries:
