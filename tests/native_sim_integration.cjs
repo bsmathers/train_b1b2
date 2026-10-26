@@ -10,6 +10,7 @@ const engine = require(path.join(host, "node_modules/@pkmn/engine"));
 const data = require(path.join(host, "node_modules/@pkmn/data"));
 const sim = require(path.join(host, "node_modules/@pkmn/sim"));
 const { resolveNativeChoice } = require(path.join(host, "native_choice.js"));
+const { originalPartyOrder, privateIdent } = require(path.join(host, "native_pov.js"));
 
 const roster = [
   ["Tauros", ["Body Slam", "Earthquake", "Blizzard", "Hyper Beam"]],
@@ -20,7 +21,7 @@ const roster = [
   ["Starmie", ["Surf", "Recover", "Thunderbolt", "Blizzard"]],
 ];
 const sets = roster.map(([species, moves]) => ({
-  name: species,
+  name: species === "Tauros" ? "BullLead" : species,
   species,
   moves,
   level: 100,
@@ -88,7 +89,8 @@ const sets = roster.map(([species, moves]) => ({
   // translates a stable Showdown party position to the native 2..6 slot.
   const sideAfter = battle.side("p1");
   const byCurrentSlot = Array.from(sideAfter.pokemon);
-  const byOriginalPosition = byCurrentSlot.slice().sort((a, b) => a.position - b.position);
+  const byOriginalPosition = originalPartyOrder(sideAfter);
+  assert.equal(privateIdent("p1", byOriginalPosition[0], decoded, "Tauros"), "p1: BullLead");
   assert.equal(byOriginalPosition[0].stored.species, "tauros");
   assert.notEqual(byCurrentSlot[0].position, byOriginalPosition[0].position,
     "A switch must reorder dynamic slots without changing original identities");
