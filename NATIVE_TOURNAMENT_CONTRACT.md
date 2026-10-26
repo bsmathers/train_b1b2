@@ -118,7 +118,11 @@ python3 -m unittest discover -s tests -p 'test_native_setup.py' -v
 The first test checks all four move slots, all six original Showdown
 party positions mapped to native dynamic slots, species/move-name
 translation, illegal and ambiguous
-requests, and explicit default/forced-action behavior. The POV tests check original order and nickname identifiers. The native integration
+requests, and explicit default/forced-action behavior. The POV tests check original order and nickname identifiers. The real
+Zig integration additionally invokes the **same** `createEngineRequest()`
+used by the host, checking both sides' private identities, active flags,
+known move lists and fixed team order against Zig's authoritative state
+before and after switching. The native integration
 test compiles/loads the *real* Zig addon, switches out of the original
 party slot 1, then issues Showdown `switch 1` and verifies it maps to a
 legal dynamic native slot. Stage-1 CI executes those tests.
