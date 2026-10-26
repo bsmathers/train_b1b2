@@ -63,7 +63,7 @@ export TAUROSV1_SAVE_DIR="$PWD/checkpoints"
 python tools/select_stage1_b1_epoch.py --mode b1 --dry-run
 
 # Complete B1 checkpoint sweep, then test interpolations of its top 3 epochs
-# against TaurosV1 Epoch 475 over five coefficients.
+# against TaurosV1 Epoch 475 over six coefficients (including exact base).
 python tools/select_stage1_b1_epoch.py \
   --mode both \
   --save-dir "$PWD/checkpoints" \
@@ -71,7 +71,7 @@ python tools/select_stage1_b1_epoch.py \
   --battles-per-side 50 \
   --top-k 3 \
   --base-epochs 475 \
-  --alphas 0.2 0.4 0.6 0.8 1.0
+  --alphas 0.0 0.2 0.4 0.6 0.8 1.0
 ```
 
 `--epochs` restricts the B1 checkpoint sweep; by default every saved B1
