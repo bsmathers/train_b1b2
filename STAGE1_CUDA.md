@@ -128,3 +128,33 @@ rerunning the same command resumes completed matches. For a short test
 use `--epochs 1 --battles-per-side 2 --output-dir checkpoints/zig_smoke`.
 `--transport showdown-server` remains available only as a legacy option,
 and must use a separate output directory from the native runner.
+
+### Faster, repeatable native setup
+
+`tools/setup_pkmn_engine.sh` now reuses the existing validated native addon
+without downloads. If a build is needed, it installs the lockfile-pinned
+`@pkmn/engine` npm package with scripts disabled and builds its included
+Zig source using `-Dshowdown -Dlog`. It does **not** run `apt`, clone a
+second `pkmn-engine` repository or fetch the slow Zig toolchain tarball
+from ziglang.org. On machines without Zig 0.16.0, it obtains the maintained
+`ziglang==0.16.0` PyPI wheel via the configured Python pip index and makes
+a reusable local shim. Node.js 20+ and npm are prerequisites.
+
+```bash
+# Stop any old server-based serve_matchup workers before restarting selection.
+git pull
+./tools/setup_pkmn_engine.sh
+
+# Smoke test one B1 checkpoint, two matches per condition/side.
+python3 tools/select_stage1_b1_epoch.py --mode b1 --epochs 1 \
+  --battles-per-side 2 --gpus 0 \
+  --output-dir checkpoints/native_smoke
+
+# Full selection. No server on port 8000 is needed.
+python3 tools/select_stage1_b1_epoch.py --mode b1 --gpus 0 \
+  --battles-per-side 50 --output-dir checkpoints/stage1_selection_zig
+```
+
+If an older `serve_matchup.py` traceback appears, that is from the
+**old** challenge-based process still running, not this Zig runner; it cannot
+be converted in place. Stop it and restart with the native launcher above.
