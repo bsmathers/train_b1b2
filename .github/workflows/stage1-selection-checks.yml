@@ -4,6 +4,7 @@ on:
     paths:
       - 'tools/select_stage1_b1_epoch.py'
       - 'tools/setup_pkmn_engine.sh'
+      - 'tests/test_native_setup.py'
       - 'metamon/rl/stage1_b2_select.py'
       - 'artifacts/good_teams_807.bz2.base64'
       - 'tests/test_stage1_selection.py'
@@ -19,4 +20,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: bash -n tools/setup_pkmn_engine.sh
+      - run: python -m unittest discover -s tests -p 'test_native_setup.py' -v
       - run: python -m unittest discover -s tests -p 'test_stage1_selection.py' -v
