@@ -1,4 +1,4 @@
-"""Run a B1/B2-vs-TaurosV0 matchup with the local Zig @pkmn/engine.
+"""Run a B1/B2/TaurosV1-vs-TaurosV0 matchup with local Zig @pkmn/engine.
 
 No Pokémon Showdown websocket/server. Two AMAGO policies act in the same
 VectorizedShowdownEnv, whose Gen 1 host uses the native Zig addon.
@@ -45,6 +45,22 @@ def get_candidate_model(model_name: str, checkpoint: int):
         get_pretrained_model,
     )
 
+    if model_name == "TaurosV1":
+        # The *unmodified* parent of B1. Use the same CUDA-safe model and
+        # stage-1 inference gin as B1; only the checkpoint weights differ.
+        # The original TaurosV1 registry entry defaults to the scratchpad
+        # training path and FlashAttention model gin, neither of which is
+        # appropriate for this standalone B1 native baseline.
+        return LocalFinetunedModel(
+            base_model=TaurosV1,
+            amago_ckpt_dir=os.environ.get(
+                "TAUROSV1_SAVE_DIR", str(Path("checkpoints").resolve())
+            ),
+            model_name="mediumg1online",
+            default_checkpoint=checkpoint,
+            model_gin_config="grouped_v2_medium_cuda.gin",
+            train_gin_config="stage1_b1_imitation.gin",
+        )
     if model_name not in ("Stage1B1", "Stage1B2"):
         return get_pretrained_model(model_name)
     prefix = "B2" if model_name == "Stage1B2" else "B1"
@@ -250,7 +266,7 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", choices=("Stage1B1", "Stage1B2"), required=True)
+    p.add_argument("--model", choices=("Stage1B1", "Stage1B2", "TaurosV1"), required=True)
     p.add_argument("--checkpoint", type=int, required=True)
     p.add_argument("--candidate-team", required=True)
     p.add_argument("--opponent-team", required=True)
