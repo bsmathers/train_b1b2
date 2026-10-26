@@ -1,4 +1,5 @@
 "use strict";
+const { resolveNativeChoice } = require("./native_choice");
 
 /**
  * High-speed vectorized battle host adapter powered by @pkmn/engine.
@@ -383,63 +384,10 @@ class EngineLane {
   _resolveChoice(sideId, choiceStr) {
     const { Choice } = pkmnEngine;
     if (!this.lastResult) return Choice.pass;
-
-    let validChoices = [];
-    try {
-      validChoices = this.battle.choices(sideId, this.lastResult) || [];
-    } catch (_) {
-      validChoices = [];
-    }
-    if (validChoices.length === 0) {
-      return Choice.pass;
-    }
-
-    if (!choiceStr || choiceStr === "default" || choiceStr === "pass") {
-      return validChoices[0];
-    }
-
-    const parts = choiceStr.trim().split(/\s+/);
-    const verb = parts[0].toLowerCase();
-    const target = parts.slice(1).join(" ").toLowerCase();
-    const side = this.battle.side(sideId);
-
-    let candidate = null;
-    if (verb === "move") {
-      let slot = /^[1-4]$/.test(target) ? parseInt(target, 10) : 0;
-      if (!slot) {
-        const norm = target.replace(/[^a-z0-9]/g, "");
-        const moves = Array.from(side.active.moves);
-        for (let i = 0; i < moves.length; i++) {
-          if (moves[i].id.replace(/[^a-z0-9]/g, "") === norm) {
-            slot = i + 1;
-            break;
-          }
-        }
-      }
-      if (slot) candidate = Choice.move(slot);
-    } else if (verb === "switch") {
-      let slot = /^[2-6]$/.test(target) ? parseInt(target, 10) : 0;
-      if (!slot) {
-        const norm = target.replace(/[^a-z0-9]/g, "");
-        const mons = Array.from(side.pokemon);
-        for (let i = 0; i < mons.length; i++) {
-          if (mons[i].stored.species.toLowerCase().replace(/[^a-z0-9]/g, "") === norm) {
-            slot = i + 1;
-            break;
-          }
-        }
-      }
-      if (slot) candidate = Choice.switch(slot);
-    }
-
-    if (candidate) {
-      const match = validChoices.find(
-        (v) => v.type === candidate.type && v.data === candidate.data
-      );
-      if (match) return match;
-    }
-
-    return validChoices[0];
+    const choices = this.battle.choices(sideId, this.lastResult) || [];
+    // A requested action must agree with native legal choices; never replace
+    // an unmatched move/switch with the first legal choice.
+    return resolveNativeChoice(choiceStr, choices, this.battle.side(sideId), Choice);
   }
 
   choose(side, choiceStr, epoch) {
