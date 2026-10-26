@@ -29,18 +29,18 @@ MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 
 mkdir -p "${METAMON_CACHE_DIR}" "${SAVE_DIR}"
 
-# The launcher can be run directly from a source checkout without installing
-# metamon itself. In that case, ensure its required poke-env distribution is
-# installed in the *same* interpreter used to start training. Importing the
-# source package alone is not enough: metamon checks distribution metadata.
-if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env")' >/dev/null 2>&1; then
-    echo "poke-env is not installed for ${PYTHON_BIN}; installing the repository dependency..."
-    "${PYTHON_BIN}" -m pip install 'poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git'
-    if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-env")' >/dev/null 2>&1; then
-        echo "ERROR: poke-env is still not installed for ${PYTHON_BIN} after installation." >&2
-        exit 1
-    fi
+# Source checkouts do not install dependencies automatically. Install the
+# project's declared dependencies together rather than chasing import errors
+# one package at a time. Use the exact interpreter used for training.
+if ! "${PYTHON_BIN}" -c 'import importlib.util; from importlib.metadata import version; version("poke-env"); assert importlib.util.find_spec("gin") and importlib.util.find_spec("amago")' >/dev/null 2>&1; then
+    echo "Stage-1 dependencies are missing for ${PYTHON_BIN}; installing this project and its dependencies..."
+    "${PYTHON_BIN}" -m pip install -e "${ROOT_DIR}"
 fi
+# Fail early if installation did not make the required dependencies importable.
+"${PYTHON_BIN}" -c 'import gin, amago; from importlib.metadata import version; version("poke-env")' || {
+    echo "ERROR: Stage-1 dependencies are unavailable for ${PYTHON_BIN} after installation." >&2
+    exit 1
+}
 
 if ! "${PYTHON_BIN}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
     if [ "${ALLOW_CPU:-0}" != "1" ]; then
