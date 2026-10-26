@@ -165,6 +165,9 @@ def add_cli(parser):
     parser.add_argument("--b1_value_head_epochs", type=int, default=100)
     parser.add_argument("--b1_value_backbone_epochs", type=int, default=1000)
     parser.add_argument("--b1_actor_epochs", type=int, default=1000)
+    parser.add_argument("--b1_value_head_steps_per_epoch", type=int, default=1000)
+    parser.add_argument("--b1_value_backbone_steps_per_epoch", type=int, default=None)
+    parser.add_argument("--b1_actor_steps_per_epoch", type=int, default=None)
     parser.add_argument("--b1_value_head_patience", type=int, default=3)
     parser.add_argument("--b1_value_backbone_patience", type=int, default=5)
     parser.add_argument("--b1_actor_patience", type=int, default=5)
@@ -484,6 +487,13 @@ if __name__ == "__main__":
                 phase1_epochs=args.b1_value_head_epochs,
                 phase2_epochs=args.b1_value_backbone_epochs,
                 actor_epochs=args.b1_actor_epochs,
+                phase1_steps_per_epoch=args.b1_value_head_steps_per_epoch,
+                phase2_steps_per_epoch=(
+                    args.b1_value_backbone_steps_per_epoch or args.steps_per_epoch
+                ),
+                actor_steps_per_epoch=(
+                    args.b1_actor_steps_per_epoch or args.steps_per_epoch
+                ),
                 phase1_patience=args.b1_value_head_patience,
                 phase2_patience=args.b1_value_backbone_patience,
                 actor_patience=args.b1_actor_patience,

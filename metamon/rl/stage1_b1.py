@@ -461,6 +461,9 @@ def run_staged_b1(
     phase1_epochs: int,
     phase2_epochs: int,
     actor_epochs: int,
+    phase1_steps_per_epoch: int,
+    phase2_steps_per_epoch: int,
+    actor_steps_per_epoch: int,
     phase1_patience: int,
     phase2_patience: int,
     actor_patience: int,
@@ -488,13 +491,22 @@ def run_staged_b1(
     numbered_policy_interval = experiment.ckpt_interval
     experiment.ckpt_interval = None
     phase_specs = (
-        (1, "value_head", phase1_epochs, phase1_patience),
-        (2, "value_backbone", phase2_epochs, phase2_patience),
-        (3, "actor", actor_epochs, actor_patience),
+        (1, "value_head", phase1_epochs, phase1_patience, phase1_steps_per_epoch),
+        (2, "value_backbone", phase2_epochs, phase2_patience, phase2_steps_per_epoch),
+        (3, "actor", actor_epochs, actor_patience, actor_steps_per_epoch),
     )
     global_epoch = 0
     validation_round = 0
-    for phase, name, max_epochs, patience in phase_specs:
+    for phase, name, max_epochs, patience, steps_per_epoch in phase_specs:
+        if steps_per_epoch < 1:
+            raise ValueError(f"{name} steps_per_epoch must be positive")
+        experiment.train_batches_per_epoch = (
+            steps_per_epoch * experiment.batches_per_update
+        )
+        print(
+            f"[B1Phase] phase={name} optimizer_steps_per_epoch={steps_per_epoch} "
+            f"max_epochs={max_epochs} patience={patience}"
+        )
         policy.set_b1_phase(phase)
         if phase == 3:
             policy.capture_phase2_reference()
