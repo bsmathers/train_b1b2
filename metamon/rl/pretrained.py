@@ -361,12 +361,14 @@ class LocalFinetunedModel(LocalPretrainedModel):
         amago_ckpt_dir: str,
         model_name: str,
         default_checkpoint: int,
+        model_gin_config: Optional[str] = None,
         train_gin_config: Optional[str] = None,
         reward_function: Optional[RewardFunction] = None,
         battle_backend: Optional[str] = None,
         dataset_config: Optional[str] = None,
     ):
         base_model = base_model()
+        model_gin_config = model_gin_config or base_model.model_gin_config
         train_gin_config = train_gin_config or base_model.train_gin_config
         reward_function = reward_function or base_model.reward_function
         battle_backend = battle_backend or base_model.battle_backend
@@ -375,7 +377,7 @@ class LocalFinetunedModel(LocalPretrainedModel):
             model_name=model_name,
             train_gin_config=train_gin_config,
             default_checkpoint=default_checkpoint,
-            model_gin_config=base_model.model_gin_config,
+            model_gin_config=model_gin_config,
             tokenizer=base_model.tokenizer,
             observation_space=base_model.observation_space,
             action_space=base_model.action_space,
@@ -1628,7 +1630,9 @@ class TaurosV1(LocalPretrainedModel):
 
     def __init__(self):
         super().__init__(
-            amago_ckpt_dir=MEDIUM_G1_ONLINE_SAVE_DIR,
+            amago_ckpt_dir=os.environ.get(
+                "TAUROSV1_SAVE_DIR", MEDIUM_G1_ONLINE_SAVE_DIR
+            ),
             model_name="mediumg1online",
             model_gin_config="grouped_v2_medium.gin",
             train_gin_config="grouped_v2_large_isfilter.gin",
@@ -1655,6 +1659,26 @@ class TaurosV1(LocalPretrainedModel):
 MEDIUM_G1_ONLINE_FT_SAVE_DIR = (
     "/mnt/nfs_client/jake/metamon_scratchpad/mediumg1online_ft"
 )
+
+
+@pretrained_model()
+class TaurosV1Stage1(LocalFinetunedModel):
+    """Stage-1 B1/B2 checkpoints with TaurosV1's architecture.
+
+    Reads ``{$STAGE1_SAVE_DIR}/{$STAGE1_RUN_NAME}/ckpts/policy_weights/policy_epoch_{N}.pt``.
+    For a B1 finetune run, ``N`` is the epoch; for a B2 interpolation run
+    (``metamon.rl.stage1_interpolate``), ``N = round(100 * alpha)``.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_model=TaurosV1,
+            amago_ckpt_dir=os.environ["STAGE1_SAVE_DIR"],
+            model_name=os.environ["STAGE1_RUN_NAME"],
+            default_checkpoint=int(os.environ.get("STAGE1_CHECKPOINT", "50")),
+            model_gin_config="grouped_v2_medium_cuda.gin",
+            train_gin_config="stage1_b1_imitation.gin",
+        )
 
 
 @pretrained_model()

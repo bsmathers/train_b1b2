@@ -1,7 +1,7 @@
-"""Python transport for the vectorized Showdown Node host.
+"""Python transport for the vectorized native battle host.
 
-Spawns ``battle_host.js`` (a single Node process running N in-process Showdown
-``BattleStream``s) and multiplexes a binary frame protocol on stdout plus
+Spawns ``battle_host_engine.js`` (the native @pkmn/engine Zig simulator for
+Gen 1, with Showdown fallback for unsupported formats) and multiplexes a binary frame protocol on stdout plus
 JSON-lines commands on stdin. A background thread reads the host's stdout into a
 thread-safe queue; the env thread dispatches those chunks to per-lane handlers
 and blocks until every lane that owes a decision has produced a fresh
@@ -24,7 +24,10 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 
-HOST_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "battle_host.js")
+HOST_SCRIPT = os.environ.get(
+    "METAMON_BATTLE_HOST",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "battle_host_engine.js"),
+)
 
 # Binary stdout frame types (must match battle_host.js).
 MSG_READY = 0
@@ -54,7 +57,7 @@ class ShowdownSimProcess:
 
     Args:
         node_path: Node executable (defaults to ``node`` on PATH).
-        host_script: Path to ``battle_host.js`` (defaults to the bundled copy).
+        host_script: Path to the native engine host (defaults to the bundled copy).
         showdown_dist: Optional path to a built ``pokemon-showdown`` sim dist.
             Forwarded to the host as ``METAMON_SHOWDOWN_DIST`` so development
             setups without an installed package can still run. In production the

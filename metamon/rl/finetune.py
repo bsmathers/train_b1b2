@@ -55,8 +55,16 @@ on the next iteration.
 """
 
 import os
+import random
 
+import torch
+import torch.nn.functional as F
 import wandb
+from einops import repeat
+from torch.utils.data import DataLoader
+
+from amago.loading import RLData_pad_collate
+from amago.nets.policy_dists import DiscreteLikeContinuous
 
 import metamon
 from metamon.rl.train import (
@@ -119,12 +127,39 @@ def add_cli(parser):
     )
 
     # Training
+    parser.add_argument(
+        "--model_gin_config",
+        type=str,
+        default=None,
+        help="Optional architecture gin override; defaults to the base model config.",
+    )
     parser.add_argument("--train_gin_config", type=str, default="finetune.gin")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--steps_per_epoch", type=int, default=1_000)
     parser.add_argument("--batch_size_per_gpu", type=int, default=12)
     parser.add_argument("--grad_accum", type=int, default=1)
     parser.add_argument("--ckpt_interval", type=int, default=10)
+    parser.add_argument(
+        "--mixed_precision",
+        choices=("no", "fp16", "bf16"),
+        default="no",
+        help="Accelerate mixed-precision mode. CUDA Stage-1 uses bf16.",
+    )
+    parser.add_argument(
+        "--validation_fraction",
+        type=float,
+        default=0.0,
+        help="Held-out trajectory fraction for actor imitation validation. Zero disables it.",
+    )
+    parser.add_argument("--validation_batches", type=int, default=50)
+    parser.add_argument("--validation_seed", type=int, default=42)
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=0,
+        help="Stop after this many non-improving validation epochs. Zero disables it.",
+    )
+    parser.add_argument("--early_stopping_min_delta", type=float, default=1e-3)
 
     # Data
     parser.add_argument(
@@ -176,6 +211,151 @@ def _resolve_checkpoint_path(args, pretrained):
     return pretrained.get_path_to_checkpoint(ckpt)
 
 
+def _set_dataset_items_per_epoch(dataset, items_per_epoch: int) -> None:
+    """Resize an already-configured AMAGO dataset, including mixtures."""
+    dataset.items_per_epoch = int(items_per_epoch)
+    for child in getattr(dataset, "all_datasets", []):
+        _set_dataset_items_per_epoch(child, items_per_epoch)
+
+
+def _configure_validation_dataset(dataset, experiment, validation_batches: int) -> None:
+    dataset.configure_from_experiment(experiment)
+    global_batch = experiment.batch_size * experiment.accelerator.num_processes
+    _set_dataset_items_per_epoch(dataset, validation_batches * global_batch)
+
+
+@torch.no_grad()
+def _actor_imitation_loss(experiment, validation_dataset, validation_seed: int) -> float:
+    """Evaluate masked actor NLL without running critics or mutating PopArt."""
+    local_seed = int(validation_seed) + 1_000_003 * experiment.accelerator.process_index
+    generator = torch.Generator().manual_seed(local_seed)
+    loader = DataLoader(
+        validation_dataset,
+        batch_size=experiment.batch_size,
+        num_workers=experiment.dloader_workers,
+        collate_fn=RLData_pad_collate,
+        pin_memory=experiment.DEVICE.type == "cuda",
+        generator=generator,
+    )
+    loader = experiment.accelerator.prepare(loader)
+    policy = experiment.policy
+    was_training = policy.training
+    python_rng_state = random.getstate()
+    random.seed(local_seed)
+    policy.eval()
+    # Keep reduction on-device and portable; float32 is easily precise enough
+    # for the small, fixed validation sample.
+    loss_sum = torch.zeros((), device=experiment.DEVICE, dtype=torch.float32)
+    count = torch.zeros((), device=experiment.DEVICE, dtype=torch.float32)
+
+    try:
+        for batch in loader:
+            obs_embedding = policy.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+            state, _ = policy.traj_encoder(
+                seq=obs_embedding, time_idxs=batch.time_idxs, hidden_state=None
+            )
+            straight_from_obs = {
+                key: batch.obs[key] for key in policy.pass_obs_keys_to_actor
+            }
+            action_dist = policy.actor(state, straight_from_obs=straight_from_obs)
+            if policy.discrete:
+                action_dist = DiscreteLikeContinuous(action_dist)
+
+            actions = batch.actions.clamp(0, 1.0) if policy.discrete else batch.actions
+            actions = F.pad(actions, (0, 0, 0, 1), "replicate")
+            actions = repeat(actions, "b l a -> b l g a", g=len(policy.gammas))
+            actions = policy.actor.policy_dist.action_from_buffer(actions)
+            if policy.discrete:
+                log_prob = action_dist.log_prob(actions).unsqueeze(-1)
+            elif policy.multibinary:
+                log_prob = action_dist.log_prob(actions).mean(-1, keepdim=True)
+            else:
+                log_prob = action_dist.log_prob(actions).sum(-1, keepdim=True)
+            log_prob = log_prob[:, :-1]
+
+            valid_state = ~((batch.rl2s == policy.pad_val).all(-1, keepdim=True))
+            mask = repeat(
+                valid_state[:, 1:], "b l 1 -> b l g 1", g=len(policy.gammas)
+            )
+            mask = mask & repeat(
+                ~batch.obs["missing_action_mask"][:, :-1],
+                "b l 1 -> b l g 1",
+                g=len(policy.gammas),
+            )
+            loss_sum += (-log_prob.float() * mask).sum()
+            count += mask.sum()
+    finally:
+        random.setstate(python_rng_state)
+        policy.train(was_training)
+
+    totals = torch.stack((loss_sum, count))
+    totals = experiment.accelerator.reduce(totals, reduction="sum")
+    if totals[1].item() == 0:
+        raise RuntimeError("validation split contains no recorded actions")
+    return (totals[0] / totals[1]).item()
+
+
+def _learn_with_early_stopping(
+    experiment,
+    validation_dataset,
+    total_epochs: int,
+    validation_seed: int,
+    patience: int,
+    min_delta: float,
+) -> None:
+    """Run AMAGO one epoch at a time and stop on held-out actor NLL."""
+    def save_best_policy() -> None:
+        if not experiment.accelerator.is_main_process:
+            return
+        best_path = os.path.join(
+            experiment.ckpt_dir, "policy_weights", "policy_best_validation.pt"
+        )
+        tmp_path = best_path + ".tmp"
+        torch.save(experiment.policy.state_dict(), tmp_path)
+        os.replace(tmp_path, best_path)
+
+    # Establish the loaded B0 checkpoint as the baseline.  Otherwise an epoch-0
+    # regression would become the first (and therefore automatically "best")
+    # checkpoint seen by early stopping.
+    best_loss = _actor_imitation_loss(
+        experiment, validation_dataset, validation_seed
+    )
+    best_epoch = -1
+    stale_epochs = 0
+    start_epoch = experiment.epoch
+    experiment.log({"Actor Imitation Loss": best_loss}, key="validation")
+    print(f"[B1Validation] epoch=initial actor_nll={best_loss:.6f}")
+    save_best_policy()
+
+    for epoch in range(start_epoch, total_epochs):
+        experiment.epoch = epoch
+        experiment.epochs = epoch + 1
+        experiment.learn()
+        val_loss = _actor_imitation_loss(experiment, validation_dataset, validation_seed)
+        experiment.log({"Actor Imitation Loss": val_loss}, key="validation")
+        print(
+            f"[B1Validation] epoch={epoch} actor_nll={val_loss:.6f} "
+            f"best={best_loss:.6f}"
+        )
+
+        if val_loss < best_loss - min_delta:
+            best_loss = val_loss
+            best_epoch = epoch
+            stale_epochs = 0
+            save_best_policy()
+        else:
+            stale_epochs += 1
+
+        if patience > 0 and stale_epochs >= patience:
+            print(
+                f"[B1EarlyStop] epoch={epoch} best_epoch={best_epoch} "
+                f"best_actor_nll={best_loss:.6f} patience={patience}"
+            )
+            break
+
+    experiment.epochs = total_epochs
+
+
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
@@ -215,12 +395,33 @@ if __name__ == "__main__":
             f"{pretrained.dataset_config}"
         )
 
+    split_enabled = args.validation_fraction > 0.0
+    if split_enabled and not 0.0 < args.validation_fraction < 1.0:
+        raise ValueError("--validation_fraction must be in (0, 1)")
+    if args.early_stopping_patience > 0 and not split_enabled:
+        raise ValueError("early stopping requires --validation_fraction > 0")
+
     amago_dataset = build_dataset(
         config=dataset_config,
         obs_space=pretrained.observation_space,
         action_space=pretrained.action_space,
         reward_function=pretrained.reward_function,
+        split="train" if split_enabled else None,
+        test_fraction=args.validation_fraction if split_enabled else 0.1,
+        split_seed=args.validation_seed,
     )
+    validation_dataset = None
+    if split_enabled:
+        validation_dataset = build_dataset(
+            config=dataset_config,
+            obs_space=pretrained.observation_space,
+            action_space=pretrained.action_space,
+            reward_function=pretrained.reward_function,
+            verbose=False,
+            split="test",
+            test_fraction=args.validation_fraction,
+            split_seed=args.validation_seed,
+        )
 
     # auto-save effective config to checkpoint directory
     config_save_path = os.path.join(args.save_dir, args.run_name, "dataset_config.yaml")
@@ -236,7 +437,7 @@ if __name__ == "__main__":
     experiment = create_offline_rl_trainer(
         ckpt_dir=args.save_dir,
         run_name=args.run_name,
-        model_gin_config=pretrained.model_gin_config_path,
+        model_gin_config=args.model_gin_config or pretrained.model_gin_config_path,
         train_gin_config=args.train_gin_config,
         obs_space=pretrained.observation_space,
         action_space=pretrained.action_space,
@@ -254,13 +455,41 @@ if __name__ == "__main__":
         wandb_entity=WANDB_ENTITY,
         manual_gin_overrides=pretrained.gin_overrides,
         ckpt_interval=args.ckpt_interval,
+        mixed_precision=args.mixed_precision,
     )
 
     experiment.start()
 
-    ckpt_path = _resolve_checkpoint_path(args, pretrained)
-    print(f"  Loading weights from: {ckpt_path}")
-    experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
+    try:
+        ckpt_path = _resolve_checkpoint_path(args, pretrained)
+        print(f"  Loading weights from: {ckpt_path}")
+        experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
 
-    experiment.learn()
-    wandb.finish()
+        if validation_dataset is None:
+            experiment.learn()
+        else:
+            if args.ckpt_interval != 1:
+                print(
+                    "[B1Validation] warning: --ckpt_interval is not 1; "
+                    "some validated epochs will not have historical checkpoints"
+                )
+            _configure_validation_dataset(
+                validation_dataset, experiment, args.validation_batches
+            )
+            _learn_with_early_stopping(
+                experiment=experiment,
+                validation_dataset=validation_dataset,
+                total_epochs=args.epochs,
+                validation_seed=args.validation_seed,
+                patience=args.early_stopping_patience,
+                min_delta=args.early_stopping_min_delta,
+            )
+    finally:
+        for env_name in ("train_envs", "val_envs"):
+            envs = getattr(experiment, env_name, None)
+            if envs is not None:
+                try:
+                    envs.close()
+                except Exception:
+                    pass
+        wandb.finish()

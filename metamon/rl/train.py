@@ -169,6 +169,7 @@ def create_offline_rl_trainer(
     wandb_entity: str = WANDB_ENTITY,
     manual_gin_overrides: Optional[dict] = None,
     ckpt_interval: int = 2,
+    mixed_precision: str = "no",
 ):
     """
     Convenience function that creates an AMAGO experiment with default arguments
@@ -244,7 +245,7 @@ def create_offline_rl_trainer(
         ## optimization ##
         batch_size=batch_size_per_gpu,
         batches_per_update=grad_accum,
-        mixed_precision="no",
+        mixed_precision=mixed_precision,
     )
     return experiment
 

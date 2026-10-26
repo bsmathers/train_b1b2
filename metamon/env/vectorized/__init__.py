@@ -1,10 +1,9 @@
-"""Vectorized Showdown simulation env for Metamon.
+"""Vectorized native simulation env for Metamon.
 
-Runs many battles in parallel inside a single Node process hosting N
-``BattleStream``s (see ``battle_host.js``) and batches the in-the-loop opponent's
+Runs Gen 1 battles through the native @pkmn/engine Zig simulator and batches the in-the-loop opponent's
 neural-network inference across lanes. By default the evaluated agent plays Showdown
-``p1``; pass ``eval_player_side=1`` for ``p2``. New code lives entirely under this
-package and uses the installed ``pokemon-showdown`` npm package.
+``p1``; pass ``eval_player_side=1`` for ``p2``. Unsupported formats retain the
+bundled Pokemon Showdown fallback.
 """
 
 from .lane import StreamBattleLane

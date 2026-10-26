@@ -1,0 +1,10 @@
+# Stage-1 B1-rehearsal (optional control): 80% strong-bot games plus 20%
+# ~Epoch475-strength bot games, to compare against B2 weight interpolation.
+replay_weight: 0.0
+custom_replays:
+  - dir: ${GOOD_REPLAYS_DIR}
+    weight: 0.8
+  - dir: ${MEDIUM_REPLAYS_DIR}
+    weight: 0.2
+formats:
+  - gen1ou

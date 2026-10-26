@@ -4,6 +4,8 @@ test_vec_trajs/
 
 # Vectorized Showdown sim host — run `npm ci` in metamon/env/vectorized/
 metamon/env/vectorized/node_modules/
+metamon/env/vectorized/pkmn-showdown.node
+/pkmn-engine/
 
 # Weights & Biases
 wandb/
@@ -169,6 +171,14 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Source files under metamon/env are not Python virtual environments.  These
+# explicit exceptions matter on case-insensitive filesystems (macOS), where
+# the generic ENV/ pattern above would otherwise hide new simulator sources.
+!metamon/env/
+!metamon/env/vectorized/
+!metamon/env/vectorized/battle_host_engine.js
+!metamon/env/vectorized/pkmn_engine_common.js
 
 # Spyder project settings
 .spyderproject

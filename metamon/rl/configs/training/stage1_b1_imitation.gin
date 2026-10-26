@@ -1,0 +1,37 @@
+import amago.agent
+
+# Stage-1 B1: imitation finetune of a TaurosV1 checkpoint.
+#
+# Same as TaurosV1's recipe (grouped_v2_large_isfilter.gin) except:
+#   - The advantage filter accepts every action (adv > -1e30 is always true),
+#     so the actor loss is plain imitation while the 4 critics keep training.
+#     (`fake_filter = True` would skip critic training entirely, and il.gin's
+#     `use_multigamma = False` changes the number of heads.)
+#   - Lower learning rate and shorter warmup for finetuning.
+
+agent.Agent.reward_multiplier = 10.
+agent.MultiTaskAgent.reward_multiplier = 10.
+
+agent.Agent.tau = .008
+agent.MultiTaskAgent.tau = .008
+
+agent.Agent.num_actions_for_value_in_critic_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_critic_loss = 4
+agent.Agent.num_actions_for_value_in_actor_loss = 1
+agent.MultiTaskAgent.num_actions_for_value_in_actor_loss = 4
+
+agent.Agent.online_coeff = 0.0
+agent.MultiTaskAgent.online_coeff = 0.0
+agent.Agent.offline_coeff = 1.0
+agent.MultiTaskAgent.offline_coeff = 1.0
+
+agent.Agent.fbc_filter_func = @agent.binary_filter
+agent.MultiTaskAgent.fbc_filter_func = @agent.binary_filter
+agent.binary_filter.threshold = -1e30
+
+MetamonAMAGOExperiment.l2_coeff = 1e-4
+MetamonAMAGOExperiment.learning_rate = 3e-5
+MetamonAMAGOExperiment.grad_clip = 1.0
+agent.Agent.critic_loss_weight = 13.5
+agent.MultiTaskAgent.critic_loss_weight = 13.5
+MetamonAMAGOExperiment.lr_warmup_steps = 2000

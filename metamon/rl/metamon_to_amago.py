@@ -55,6 +55,69 @@ else:
     from amago.loading import RLData, RLDataset, Batch, MAGIC_PAD_VAL
     from amago.envs.amago_env import AMAGO_ENV_LOG_PREFIX
     from amago.nets.ff import Normalization
+    from amago.nets.transformer import SelfAttention
+
+
+@gin.configurable
+class MetamonVanillaAttention(SelfAttention):
+    """PyTorch causal attention with an optional left sliding window.
+
+    This is the non-FlashAttention path used by the Stage-1 CUDA run. A
+    ``window_size`` of 32 matches TaurosV1's FlashAttention ``(32, 0)`` mask,
+    including the current token, without adding checkpoint parameters.
+    """
+
+    def __init__(self, causal: bool, dropout: float, window_size: int = 32):
+        super().__init__(causal=causal, dropout=dropout)
+        if window_size < 0:
+            raise ValueError("window_size must be non-negative")
+        self.window_size = int(window_size)
+
+    def _attention(self, queries, keys, values, allowed):
+        # SDPA is implemented by stock PyTorch and has fused CUDA backends. Boolean
+        # masks use True for entries that are allowed to participate.
+        q = queries.transpose(1, 2)
+        k = keys.transpose(1, 2)
+        v = values.transpose(1, 2)
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=allowed,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        return out.transpose(1, 2)
+
+    def forward(self, qkv, key_cache=None, val_cache=None, cache_seqlens=None):
+        queries, keys, values = torch.unbind(qkv, dim=2)
+        batch, length, _heads, _head_dim = queries.shape
+
+        if key_cache is None or val_cache is None or cache_seqlens is None:
+            positions = torch.arange(length, device=qkv.device)
+            delta = positions[:, None] - positions[None, :]
+            allowed = delta >= 0 if self.causal else torch.ones_like(delta).bool()
+            if self.window_size:
+                allowed &= delta <= self.window_size
+            allowed = allowed.view(1, 1, length, length)
+            return self._attention(queries, keys, values, allowed)
+
+        if self.training:
+            raise RuntimeError("KV-cache inference requires eval mode")
+        if length != 1:
+            raise ValueError("KV-cache inference expects one timestep")
+        cache_rows = torch.arange(batch, device=qkv.device)
+        key_cache[cache_rows, cache_seqlens] = keys[:, 0]
+        val_cache[cache_rows, cache_seqlens] = values[:, 0]
+        end = cache_seqlens + 1
+        max_len = int(end.max().item())
+        cached_keys = torch.nan_to_num(key_cache[:, :max_len])
+        cached_values = torch.nan_to_num(val_cache[:, :max_len])
+        positions = torch.arange(max_len, device=qkv.device).view(1, 1, 1, max_len)
+        newest = (end - 1).view(batch, 1, 1, 1)
+        allowed = positions <= newest
+        if self.window_size:
+            allowed &= positions >= newest - self.window_size
+        return self._attention(queries, cached_keys, cached_values, allowed)
 
 
 # --------------------------------------------------------------------------- #
@@ -544,6 +607,19 @@ class MetamonDiscrete(amago.nets.policy_dists.Discrete):
             clip_prob_high=clip_prob_high,
         )
         self.temperature = temperature
+
+    def action_from_buffer(self, action: torch.Tensor) -> torch.Tensor:
+        """Convert buffered discrete actions to exact one-hot vectors.
+
+        AMAGO's base implementation clips one-hot vectors into soft probability
+        vectors.  ``MultiTaskAgent`` subsequently passes that tensor to
+        ``OneHotCategorical.log_prob``, whose support requires an actual one-hot
+        sample. Padded batches contain all-sentinel action rows; mapping those to
+        an arbitrary valid one-hot is safe because their losses are masked later.
+        The critic also documents discrete action inputs as one-hot.
+        """
+        action_idx = action.argmax(dim=-1)
+        return F.one_hot(action_idx, num_classes=action.shape[-1]).to(action.dtype)
 
     def forward(
         self, vec: torch.Tensor, log_dict: Optional[dict] = None
