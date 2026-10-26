@@ -49,20 +49,63 @@ function createEngineRequest(engineBattle, gen, sideId, playerName, res, origina
     return { forceSwitch: [true], side: sideObj };
   }
 
+  // IMPORTANT: The policy's legality mask is derived from this synthetic
+  // private Showdown request. Reflect *native Zig* choices, not simply the
+  // Pokemon's stored moves. Zig disallows most/all moves during recharge,
+  // Thrash/Rage/charging, Bide, Bind/Wrap, Disable, and depleted PP.
+  //
+  // In Showdown-compatibility mode an automatic forced action is exposed as
+  // the single native Choice.move(1). A regular move with the same index is
+  // NOT necessarily legal from the player's point of view.
+  const legal = engineBattle.choices(sideId, res);
+  const legalMoveSlots = new Set(
+    legal.filter(c => c.type === "move").map(c => c.data)
+  );
+  const volatiles = side.active.volatiles;
+  const isForced = !!(volatiles.recharging || volatiles.rage ||
+    volatiles.thrashing || volatiles.charging);
+  if (isForced) {
+    // 'recharge' and 'fight' are supported pseudo moves by Metamon's
+    // request parser and UniversalAction.action_idx_to_BattleOrder. They
+    // preserve the model's complete underlying moveset and make all of
+    // its move action indices resolve to the sole native forced move.
+    if (legal.length !== 1 || legal[0].type !== "move" || legal[0].data !== 1) {
+      throw new Error(
+        `Unexpected native forced choices for ${sideId}: ${JSON.stringify(legal)}`
+      );
+    }
+    const alias = volatiles.recharging ? "recharge" : "fight";
+    return {
+      active: [{ moves: [{
+        move: alias === "recharge" ? "Recharge" : "Fight",
+        id: alias,
+        pp: 1,
+        maxpp: 1,
+        target: "normal",
+        disabled: false,
+      }] }],
+      side: sideObj,
+    };
+  }
+
   const activeMoves = [];
-  for (const m of Array.from(side.active.moves)) {
+  for (const [i, m] of Array.from(side.active.moves).entries()) {
     const moveData = gen.moves.get(m.id);
     const moveName = moveData ? moveData.name : m.id;
     activeMoves.push({
       move: moveName,
       id: m.id,
       pp: m.pp,
-      maxpp: Math.floor((moveData.pp * 8) / 5),
-      target: moveData.target,
-      disabled: !!m.disabled,
+      maxpp: moveData ? Math.floor((moveData.pp * 8) / 5) : m.pp,
+      target: moveData?.target || "normal",
+      // Never advertise a move that Zig would reject. This matters for
+      // Bide / Wrap / Bind locks, Disable and exhausted PP.
+      disabled: !legalMoveSlots.has(i + 1),
     });
   }
-
+  // Zig has a dedicated Choice.move(0) for Struggle in non-Showdown mode.
+  // In showdown=true mode Struggle is represented as move 1. Do not
+  // arbitrarily substitute moves if the actual engine offers no choice.
   return { active: [{ moves: activeMoves }], side: sideObj };
 }
 
