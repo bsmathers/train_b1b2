@@ -1,4 +1,5 @@
 """CPU-only smoke tests for Stage-1 tournament selection."""
+
 import importlib.util
 import json
 import tempfile
@@ -30,15 +31,24 @@ class SelectionTests(unittest.TestCase):
         for own, other in select.CONDITIONS:
             for reverse in (False, True):
                 key = f"b1-{own}-{other}-{reverse}"
-                entries.append(("B1_e1", own, other, reverse,
-                                SimpleNamespace(matchup_id=key, n_battles=10)))
+                entries.append(
+                    (
+                        "B1_e1",
+                        own,
+                        other,
+                        reverse,
+                        SimpleNamespace(matchup_id=key, n_battles=10),
+                    )
+                )
                 # Candidate wins 7/10 on each side regardless of player order.
-                results.append(SimpleNamespace(
-                    matchup_id=key,
-                    total_battles=10,
-                    policy_a_wins=3 if reverse else 7,
-                    policy_b_wins=7 if reverse else 3,
-                ))
+                results.append(
+                    SimpleNamespace(
+                        matchup_id=key,
+                        total_battles=10,
+                        policy_a_wins=3 if reverse else 7,
+                        policy_b_wins=7 if reverse else 3,
+                    )
+                )
         with tempfile.TemporaryDirectory() as t:
             rows = select.score_tournament(entries, results, Path(t))
             self.assertEqual(len(rows), 1)
@@ -55,10 +65,23 @@ class SelectionTests(unittest.TestCase):
         for own, other in select.CONDITIONS:
             for reverse in (False, True):
                 key = f"{own}-{other}-{reverse}"
-                entries.append(("B1_e2", own, other, reverse,
-                                SimpleNamespace(matchup_id=key, n_battles=10)))
-                results.append(SimpleNamespace(matchup_id=key, total_battles=10,
-                                               policy_a_wins=4, policy_b_wins=4))
+                entries.append(
+                    (
+                        "B1_e2",
+                        own,
+                        other,
+                        reverse,
+                        SimpleNamespace(matchup_id=key, n_battles=10),
+                    )
+                )
+                results.append(
+                    SimpleNamespace(
+                        matchup_id=key,
+                        total_battles=10,
+                        policy_a_wins=4,
+                        policy_b_wins=4,
+                    )
+                )
         with tempfile.TemporaryDirectory() as t:
             directory = Path(t)
             rows = select.score_tournament(entries, results, directory)
@@ -83,9 +106,14 @@ class SelectionTests(unittest.TestCase):
             finetuned.mkdir(parents=True)
             (base / "policy_epoch_475.pt").touch()
             (finetuned / "policy_epoch_4.pt").touch()
-            rows = generate_interpolations([(475, 4, 0.3), (475, 4, 0.7)],
-                                           root, root, "stage1_b1",
-                                           "stage1_b2", dry_run=True)
+            rows = generate_interpolations(
+                [(475, 4, 0.3), (475, 4, 0.7)],
+                root,
+                root,
+                "stage1_b1",
+                "stage1_b2",
+                dry_run=True,
+            )
             self.assertEqual([r["id"] for r in rows], [1, 2])
             self.assertEqual([r["alpha"] for r in rows], [0.3, 0.7])
 
