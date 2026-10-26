@@ -62,7 +62,9 @@ original party position; Zig keeps the active Pokémon in dynamic slot 1,
 so a native `Choice.switch` can only target **2–6**. The adapter translates
 `side.slot(originalPosition)` to the dynamic slot before executing a switch.
 Private request Pokémon are sorted by their stable `Pokemon.position`,
-rather than Zig's reordered `side.pokemon` iteration order.
+rather than Zig's reordered `side.pokemon` iteration order. Original team nicknames are also retained in each
+private `ident` (e.g. `p1: BullLead`), matching the names in the public
+protocol log; species names remain in `details`.
 
 Crucially, switching **back into the initial lead** uses **Showdown**
 `switch 1`, which is translated into the appropriate **native dynamic
@@ -111,9 +113,10 @@ python3 -m unittest discover -s tests -p 'test_stage1_selection.py' -v
 python3 -m unittest discover -s tests -p 'test_native_setup.py' -v
 ```
 
-The first test checks all four move slots, all six native party slots
-(including slot 1), species/move-name translation, illegal and ambiguous
-requests, and explicit default/forced-action behavior. The native integration
+The first test checks all four move slots, all six original Showdown
+party positions mapped to native dynamic slots, species/move-name
+translation, illegal and ambiguous
+requests, and explicit default/forced-action behavior. The POV tests check original order and nickname identifiers. The native integration
 test compiles/loads the *real* Zig addon, switches out of the original
 party slot 1, then issues Showdown `switch 1` and verifies it maps to a
 legal dynamic native slot. Stage-1 CI executes those tests.
