@@ -96,8 +96,8 @@ class SelectionTests(unittest.TestCase):
             path = Path(directory) / "native.log"
             self.assertIn("could not read", select.native_log_tail(path))
             path.write_text(
-                "boot\\npreflight\\nTraceback (most recent call last):\\n"
-                "RuntimeError: native choice mismatch\\n"
+                "boot\npreflight\nTraceback (most recent call last):\n"
+                "RuntimeError: native choice mismatch\n"
             )
             text = select.native_log_tail(path)
             self.assertIn("RuntimeError: native choice mismatch", text)
