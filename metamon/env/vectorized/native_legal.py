@@ -9,6 +9,7 @@ These aliases are *not* arbitrary trainer choices. Map automatic decisions to
 canonical action 0; only the Struggle case may still allow regular switches.
 """
 
+
 def canonical_legal_indices(regular_legal, request):
     active = (request or {}).get("active") or []
     moves = active[0].get("moves") or [] if active else []
