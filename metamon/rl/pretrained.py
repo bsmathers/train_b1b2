@@ -1663,11 +1663,9 @@ MEDIUM_G1_ONLINE_FT_SAVE_DIR = (
 
 @pretrained_model()
 class TaurosV1Stage1(LocalFinetunedModel):
-    """Stage-1 B1/B2 checkpoints with TaurosV1's architecture.
+    """Stage-1 B1 checkpoints with TaurosV1's architecture.
 
     Reads ``{$STAGE1_SAVE_DIR}/{$STAGE1_RUN_NAME}/ckpts/policy_weights/policy_epoch_{N}.pt``.
-    For a B1 finetune run, ``N`` is the epoch; for a B2 interpolation run
-    (``metamon.rl.stage1_interpolate``), ``N = round(100 * alpha)``.
     """
 
     def __init__(self):

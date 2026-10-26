@@ -11,6 +11,14 @@ MetamonAMAGOExperiment.lr_warmup_steps = 500
 stage1_b1.Stage1B1Agent.policy_kl_coef = 1.0
 stage1_b1.Stage1B1Agent.value_kl_coef = 1.0
 stage1_b1.Stage1B1Agent.l2sp_coef = 1e-3
+# Prefix weights are parameter-count normalized. More specific prefixes win,
+# so individual encoder blocks can be protected more or less strongly without
+# the former accidental bias toward small tensors. Equal defaults preserve a
+# conventional whole-backbone mean-squared movement penalty.
+stage1_b1.Stage1B1Agent.l2sp_layer_weights = {
+    "tstep_encoder": 1.0,
+    "traj_encoder": 1.0,
+}
 stage1_b1.Stage1B1Agent.actor_value_coef = 1.0
 stage1_b1.Stage1B1Agent.awr_temperature = 0.5
 stage1_b1.Stage1B1Agent.awr_min_weight = 0.25

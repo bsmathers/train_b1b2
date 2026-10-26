@@ -10,9 +10,8 @@ export METAMON_CACHE_DIR="${METAMON_CACHE_DIR:-${ROOT_DIR}/cache}"
 export GOOD_REPLAYS_DIR="${GOOD_REPLAYS_DIR:-${ROOT_DIR}/cache/strong_model_replays_parsed}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 # The installed AMAGO version decorates the transformer path with torch.compile,
-# which has failed during local smoke tests. Eager execution still dispatches
-# PyTorch's fused CUDA SDPA kernels. Opt back in only after a machine-specific
-# smoke test.
+# which has failed during local smoke tests. FlashAttention remains fused even
+# when Dynamo is disabled. Opt back in only after a machine-specific smoke test.
 if [ "${ENABLE_TORCH_COMPILE:-0}" != "1" ]; then
     export TORCHDYNAMO_DISABLE=1
 fi
@@ -44,17 +43,44 @@ if ! "${PYTHON_BIN}" -c 'from importlib.metadata import version; version("poke-e
 fi
 
 if ! "${PYTHON_BIN}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
-    if [ "${ALLOW_CPU:-0}" != "1" ]; then
-        echo "ERROR: CUDA is unavailable. Set PYTHON_BIN to a CUDA-enabled Python."
-        echo "Set ALLOW_CPU=1 only for a short smoke test; full CPU training is impractical."
-        exit 1
-    fi
-    echo "WARNING: CUDA unavailable; running on CPU because ALLOW_CPU=1"
-    MIXED_PRECISION="no"
-elif [ "${MIXED_PRECISION}" = "bf16" ] && ! "${PYTHON_BIN}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_bf16_supported() else 1)'; then
-    echo "ERROR: this CUDA GPU does not support BF16; set MIXED_PRECISION=fp16."
+    echo "ERROR: CUDA is unavailable. Set PYTHON_BIN to a CUDA-enabled Python."
     exit 1
 fi
+
+# AMAGO v3.4's FlashAttention adapter explicitly converts QKV to BF16 even if
+# the outer autocast mode is FP16, so reject GPUs that cannot execute BF16.
+if ! "${PYTHON_BIN}" -c 'import torch; raise SystemExit(0 if torch.cuda.is_bf16_supported() else 1)'; then
+    echo "ERROR: AMAGO v3.4 FlashAttention requires a BF16-capable CUDA GPU."
+    exit 1
+fi
+
+if ! "${PYTHON_BIN}" -c 'import flash_attn' >/dev/null 2>&1; then
+    if ! command -v nvcc >/dev/null 2>&1; then
+        echo "ERROR: FlashAttention is missing and nvcc is unavailable. Use a CUDA development image."
+        exit 1
+    fi
+    echo "Installing ${FLASH_ATTN_SPEC:-flash-attn}; CUDA kernels may compile once"
+    "${PYTHON_BIN}" -m pip install -U packaging ninja
+    MAX_JOBS="${MAX_JOBS:-4}" "${PYTHON_BIN}" -m pip install --no-build-isolation \
+        "${FLASH_ATTN_SPEC:-flash-attn}"
+fi
+
+"${PYTHON_BIN}" - <<'PY'
+import torch
+from amago.nets.transformer import FlashAttention
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable during the FlashAttention smoke test")
+qkv = torch.randn(
+    1, 64, 3, 4, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True
+)
+attention = FlashAttention(causal=True, dropout=0.0, window_size=(32, 0)).cuda()
+attention.train()
+out = attention(qkv)
+out.float().square().mean().backward()
+torch.cuda.synchronize()
+print("AMAGO FlashAttention training smoke test succeeded")
+PY
 
 if [ ! -f "${TAUROSV1_SAVE_DIR}/mediumg1online/ckpts/policy_weights/policy_epoch_475.pt" ]; then
     "${PYTHON_BIN}" "${ROOT_DIR}/tools/assemble_epoch475.py" --repo-root "${ROOT_DIR}"

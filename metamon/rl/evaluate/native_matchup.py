@@ -1,4 +1,4 @@
-"""Run a B1/B2/TaurosV1-vs-TaurosV0 matchup with local Zig @pkmn/engine.
+"""Run a B1/TaurosV1-vs-TaurosV0 matchup with local Zig @pkmn/engine.
 
 No Pokémon Showdown websocket/server. Two AMAGO policies act in the same
 VectorizedShowdownEnv, whose Gen 1 host uses the native Zig addon.
@@ -64,18 +64,14 @@ def get_candidate_model(model_name: str, checkpoint: int):
             model_gin_config="grouped_v2_medium_cuda.gin",
             train_gin_config="stage1_b1_imitation.gin",
         )
-    if model_name not in ("Stage1B1", "Stage1B2"):
+    if model_name != "Stage1B1":
         return get_pretrained_model(model_name)
-    prefix = "B2" if model_name == "Stage1B2" else "B1"
     return LocalFinetunedModel(
         base_model=TaurosV1,
         amago_ckpt_dir=os.environ.get(
-            prefix + "_SAVE_DIR", str(Path("checkpoints").resolve())
+            "B1_SAVE_DIR", str(Path("checkpoints").resolve())
         ),
-        model_name=os.environ.get(
-            prefix + "_RUN_NAME",
-            "stage1_b2_selection" if prefix == "B2" else "stage1_b1",
-        ),
+        model_name=os.environ.get("B1_RUN_NAME", "stage1_b1"),
         default_checkpoint=checkpoint,
         model_gin_config="grouped_v2_medium_cuda.gin",
         train_gin_config="stage1_b1_imitation.gin",
@@ -270,7 +266,7 @@ def run(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--model", choices=("Stage1B1", "Stage1B2", "TaurosV1"), required=True
+        "--model", choices=("Stage1B1", "TaurosV1"), required=True
     )
     p.add_argument("--checkpoint", type=int, required=True)
     p.add_argument("--candidate-team", required=True)

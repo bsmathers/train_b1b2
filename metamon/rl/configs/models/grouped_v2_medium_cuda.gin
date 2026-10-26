@@ -79,7 +79,6 @@ traj_encoders.TformerTrajEncoder.sigma_reparam = True
 traj_encoders.TformerTrajEncoder.norm = "layer"
 traj_encoders.TformerTrajEncoder.head_scaling = True
 traj_encoders.TformerTrajEncoder.activation = "leaky_relu"
-# Standard PyTorch SDPA. On CUDA, PyTorch selects its fused CUDA backend
-# without depending on the external flash-attn package.
-traj_encoders.TformerTrajEncoder.attention_type = @MetamonVanillaAttention
-MetamonVanillaAttention.window_size = 32
+# Match Epoch475's causal 32-token receptive field with the fused CUDA kernel.
+traj_encoders.TformerTrajEncoder.attention_type = @transformer.FlashAttention
+transformer.FlashAttention.window_size = (32, 0)

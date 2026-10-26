@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""B1/B2 checkpoint selection using balanced Gen1 OU tournaments vs TaurosV0.
+"""B1 checkpoint selection using balanced Gen1 OU tournaments vs TaurosV0.
 
-B1: Evaluate every saved checkpoint. B2: interpolate top B1 checkpoints with
-selected TaurosV1 base checkpoints at multiple alphas; tournament the resulting
-models too. Each candidate plays good/good, good/bad, bad/good and bad/bad,
-in both challenger and acceptor roles. Draws count as half a win.
+Each candidate plays good/good, good/bad, bad/good and bad/bad, in both
+challenger and acceptor roles. Draws count as half a win.
 """
 
 import argparse
@@ -235,7 +233,7 @@ def run_native_tournament(entries, output, args):
             log_path = matchup_dir / "native.log"
             # Clear stale worker output before rerunning a failed matchup.
             result_path.unlink(missing_ok=True)
-            model = "Stage1B2" if candidate.startswith("B2_") else "Stage1B1"
+            model = "Stage1B1"
             checkpoint = (
                 spec.policy_b.checkpoint if reverse else spec.policy_a.checkpoint
             )
@@ -431,7 +429,6 @@ def run_tournament(entries, output, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("b1", "b2", "both"), default="both")
     parser.add_argument(
         "--transport",
         choices=("native", "showdown-server"),
@@ -442,9 +439,7 @@ def main():
     parser.add_argument("--native-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--save-dir", type=Path, default=ROOT / "checkpoints")
-    parser.add_argument("--taurosv1-dir", type=Path)
     parser.add_argument("--run-name", default="stage1_b1")
-    parser.add_argument("--b2-run-name", default="stage1_b2_selection")
     parser.add_argument(
         "--output-dir", type=Path, default=ROOT / "checkpoints" / "stage1_selection_zig"
     )
@@ -456,11 +451,6 @@ def main():
     parser.add_argument(
         "--epochs", type=int, nargs="*", help="B1 epochs (default: all saved)"
     )
-    parser.add_argument("--base-epochs", type=int, nargs="+", default=[475])
-    parser.add_argument(
-        "--alphas", type=float, nargs="+", default=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    )
-    parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--battles-per-side", type=int, default=50)
     parser.add_argument("--max-concurrent", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=3600)
@@ -469,19 +459,15 @@ def main():
     args = parser.parse_args()
     if args.native_lanes < 1 or args.native_workers < 1:
         parser.error("native lanes and native workers must be positive")
-    if args.battles_per_side < 1 or args.top_k < 1 or args.max_concurrent < 1:
-        parser.error("battle count, top-k and concurrency must be positive")
-    if not args.gpus or any(not 0.0 <= alpha <= 1.0 for alpha in args.alphas):
-        parser.error("At least one GPU and all alphas in [0,1] are required")
+    if args.battles_per_side < 1 or args.max_concurrent < 1:
+        parser.error("battle count and concurrency must be positive")
+    if not args.gpus:
+        parser.error("At least one GPU is required")
     args.save_dir = args.save_dir.resolve()
-    args.taurosv1_dir = (args.taurosv1_dir or args.save_dir).resolve()
     args.cache_dir = args.cache_dir.resolve()
     os.environ["METAMON_CACHE_DIR"] = str(args.cache_dir)
-    os.environ["TAUROSV1_SAVE_DIR"] = str(args.taurosv1_dir)
     os.environ["B1_SAVE_DIR"] = str(args.save_dir)
     os.environ["B1_RUN_NAME"] = args.run_name
-    os.environ["B2_SAVE_DIR"] = str(args.save_dir)
-    os.environ["B2_RUN_NAME"] = args.b2_run_name
     install_good_teams(args.cache_dir, args.good_teams_zip)
     epochs = sorted(
         set(
@@ -502,95 +488,23 @@ def main():
         )
         if epoch < 1 or not path.is_file():
             parser.error(f"Missing valid B1 checkpoint: {path}")
-    if args.mode in ("b1", "both"):
-        b1_entries = [
-            entry
-            for epoch in epochs
-            for entry in matchups(
-                f"B1_e{epoch}", "Stage1B1", epoch, args.battles_per_side
-            )
-        ]
-        b1_scores = run_tournament(b1_entries, args.output_dir / "b1", args)
-        if args.dry_run:
-            return
-        ranked = ranked_completed(b1_scores)
-        if len(ranked) != len(epochs):
-            raise RuntimeError(
-                "B1 tournament results incomplete; rerun to finish before B2"
-            )
-        (args.output_dir / "b1" / "selected_epoch.json").write_text(
-            json.dumps(ranked[0], indent=2) + "\n"
+    entries = [
+        entry
+        for epoch in epochs
+        for entry in matchups(
+            f"B1_e{epoch}", "Stage1B1", epoch, args.battles_per_side
         )
-        b1_choice = [int(r["candidate"].split("_e")[-1]) for r in ranked[: args.top_k]]
-        print(f"Selected B1 epoch {b1_choice[0]}")
-        if args.mode == "b1":
-            return
-    else:
-        b1_scores_path = args.output_dir / "b1" / "candidate_scores.csv"
-        if not b1_scores_path.exists():
-            parser.error("B1 results missing; run --mode b1 first")
-        with b1_scores_path.open(newline="") as f:
-            ranked = ranked_completed(
-                [
-                    {
-                        **row,
-                        "complete": row["complete"] == "True",
-                        "macro_win_rate": (
-                            float(row["macro_win_rate"])
-                            if row["macro_win_rate"]
-                            else None
-                        ),
-                    }
-                    for row in csv.DictReader(f)
-                ]
-            )
-        b1_choice = [int(r["candidate"].split("_e")[-1]) for r in ranked[: args.top_k]]
-        if not b1_choice:
-            parser.error("No completed B1 candidates")
-    from metamon.rl.stage1_b2_select import generate_interpolations
-
-    combinations = [
-        (base, b1, alpha)
-        for base in sorted(set(args.base_epochs))
-        for b1 in b1_choice
-        for alpha in sorted(set(args.alphas))
-        if alpha != 0.0 or b1 == b1_choice[0]
     ]
-    b2_manifest = generate_interpolations(
-        combinations,
-        args.taurosv1_dir,
-        args.save_dir,
-        args.run_name,
-        args.b2_run_name,
-        dry_run=args.dry_run,
+    scores = run_tournament(entries, args.output_dir / "b1", args)
+    if args.dry_run:
+        return
+    ranked = ranked_completed(scores)
+    if len(ranked) != len(epochs):
+        raise RuntimeError("B1 tournament results incomplete; rerun to finish")
+    (args.output_dir / "b1" / "selected_epoch.json").write_text(
+        json.dumps(ranked[0], indent=2) + "\n"
     )
-    b2_entries = [
-        item
-        for info in b2_manifest
-        for item in matchups(
-            f"B2_base{info['base_epoch']}_b1{info['b1_epoch']}_a{info['alpha']}",
-            "Stage1B2",
-            info["id"],
-            args.battles_per_side,
-        )
-    ]
-    b2_scores = run_tournament(b2_entries, args.output_dir / "b2", args)
-    if not args.dry_run:
-        ranked_b2 = ranked_completed(b2_scores)
-        if len(ranked_b2) != len(b2_manifest):
-            raise RuntimeError("B2 tournament incomplete; rerun to finish")
-        selected = ranked_b2[0]
-        info = next(
-            info
-            for info in b2_manifest
-            if selected["candidate"]
-            == f"B2_base{info['base_epoch']}_b1{info['b1_epoch']}_a{info['alpha']}"
-        )
-        final = {**selected, **info}
-        (args.output_dir / "b2" / "selected_interpolation.json").write_text(
-            json.dumps(final, indent=2) + "\n"
-        )
-        print("Selected B2:", json.dumps(final, indent=2))
+    print(f"Selected B1 epoch {ranked[0]['candidate'].split('_e')[-1]}")
 
 
 if __name__ == "__main__":

@@ -56,19 +56,15 @@ def main():
     from metamon.rl.metamon_to_amago import make_challenge_env
 
     # Load model
-    if args.model_name in ("Stage1B1", "Stage1B2"):
+    if args.model_name == "Stage1B1":
         from metamon.rl.pretrained import LocalFinetunedModel, TaurosV1
 
-        is_b2 = args.model_name == "Stage1B2"
-        prefix = "B2" if is_b2 else "B1"
         pretrained = LocalFinetunedModel(
             base_model=TaurosV1,
             amago_ckpt_dir=os.environ.get(
-                f"{prefix}_SAVE_DIR", os.path.abspath("checkpoints")
+                "B1_SAVE_DIR", os.path.abspath("checkpoints")
             ),
-            model_name=os.environ.get(
-                f"{prefix}_RUN_NAME", "stage1_b2_selection" if is_b2 else "stage1_b1"
-            ),
+            model_name=os.environ.get("B1_RUN_NAME", "stage1_b1"),
             default_checkpoint=args.checkpoint if args.checkpoint is not None else 0,
             model_gin_config="grouped_v2_medium_cuda.gin",
             train_gin_config="stage1_b1_imitation.gin",

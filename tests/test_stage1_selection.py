@@ -118,32 +118,5 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             native.finish_score(False, [False], {"won": [True]}, 0)
 
-    def test_dry_run_interpolation_grid(self):
-        spec_b2 = importlib.util.spec_from_file_location(
-            "stage1_b2", ROOT / "metamon" / "rl" / "stage1_b2_select.py"
-        )
-        b2 = importlib.util.module_from_spec(spec_b2)
-        spec_b2.loader.exec_module(b2)
-        generate_interpolations = b2.generate_interpolations
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            base = root / "mediumg1online/ckpts/policy_weights"
-            finetuned = root / "stage1_b1/ckpts/policy_weights"
-            base.mkdir(parents=True)
-            finetuned.mkdir(parents=True)
-            (base / "policy_epoch_475.pt").touch()
-            (finetuned / "policy_epoch_4.pt").touch()
-            rows = generate_interpolations(
-                [(475, 4, 0.3), (475, 4, 0.7)],
-                root,
-                root,
-                "stage1_b1",
-                "stage1_b2",
-                dry_run=True,
-            )
-            self.assertEqual([r["id"] for r in rows], [1, 2])
-            self.assertEqual([r["alpha"] for r in rows], [0.3, 0.7])
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,17 @@ Training runs three stages:
    policy KL, stage-2 value-distribution KL, and stage-2 backbone L2-SP, up to
    1,000 epochs, patience 5.
 
+Each phase validates its entry model before taking an update, and early stopping
+restores matching policy, AdamW, and learning-rate-scheduler state. Validation
+uses a fresh deterministic sample from the held-out split on every pass rather
+than repeatedly overfitting the same 600 trajectories.
+
+L2-SP weights are configurable by component-aligned parameter-name prefix in
+`stage1_b1_imitation.gin`; the longest matching prefix wins. For example,
+`"traj_encoder": 2.0` can protect the trajectory transformer twice as strongly,
+while a more specific `"traj_encoder.tformer.layers.0": 4.0` protects one block.
+Weights are normalized by weighted parameter count, and `0.0` excludes a layer.
+
 An epoch defaults to 100 optimizer updates. Best phase checkpoints are written
 under `checkpoints/stage1_b1/ckpts/policy_weights/` as:
 
@@ -39,5 +50,11 @@ under `checkpoints/stage1_b1/ckpts/policy_weights/` as:
 - `policy_value_backbone_best.pt`
 - `policy_actor_best.pt`
 
-The launcher defaults to BF16 and eager execution. Override `BATCH_SIZE`,
+The final restored actor is also published as `policy_final_best.pt`, a new
+numbered `policy_epoch_N.pt`, and `ckpts/latest/policy.pt`, so standard evaluation
+tools cannot accidentally load the final rejected epoch.
+
+The launcher defaults to BF16, eager execution, and fused FlashAttention with
+the same causal `(32, 0)` window as Epoch475. It installs and smoke-tests
+`flash-attn` when needed. Override `BATCH_SIZE`,
 `STEPS_PER_EPOCH`, `DLOADER_WORKERS`, or `MIXED_PRECISION` as needed.

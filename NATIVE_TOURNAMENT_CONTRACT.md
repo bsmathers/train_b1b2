@@ -114,17 +114,16 @@ to reject other mismatches.
 ## Training versus evaluation
 
 `tools/train_stage1_b1_cuda.sh` invokes `metamon.rl.finetune` and
-`stage1_b1_strong.yaml`, with `replay_weight: 0.0` and curated recorded
-trajectories. This is **offline imitation/critic training**, not rollout
-collection through the native simulator. Adapter bugs in live matches do
-**not** directly alter its recorded training trajectories or optimizer
-updates. This does not prove the dataset's labels, model weights, or
-training objective are error-free.
+`stage1_b1_strong.yaml`. Its offline mixture is 50% strong-model, 40% human,
+and 10% pac-tauros recorded trajectories. It does not collect new rollouts
+through the native simulator, so live adapter bugs do **not** directly alter
+its training trajectories or optimizer updates. This does not prove the
+dataset's labels, model weights, or training objective are error-free.
 
-The actor is trained against recorded moves; reported validation
-imitation NLL measures agreement with held-out records, **not** strength
-against TaurosV0. Do not interpret a low live win rate alone as proof
-that training malfunctioned.
+Early phases select held-out W/L/D value loss or the complete constrained
+value objective. The actor phase selects its full advantage-weighted imitation
+objective, including policy/value drift penalties. These offline validation
+metrics are **not** strength against TaurosV0; use a native tournament for that.
 
 ## Validation matrix
 

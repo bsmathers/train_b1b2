@@ -60,6 +60,7 @@ class Stage1B1Agent(MultiTaskAgent):
         policy_kl_coef: float = 1.0,
         value_kl_coef: float = 1.0,
         l2sp_coef: float = 1e-3,
+        l2sp_layer_weights: dict[str, float] | None = None,
         actor_value_coef: float = 1.0,
         awr_temperature: float = 0.5,
         awr_min_weight: float = 0.25,
@@ -73,6 +74,15 @@ class Stage1B1Agent(MultiTaskAgent):
         self.policy_kl_coef = float(policy_kl_coef)
         self.value_kl_coef = float(value_kl_coef)
         self.l2sp_coef = float(l2sp_coef)
+        self.l2sp_layer_weights = {
+            str(prefix): float(weight)
+            for prefix, weight in (l2sp_layer_weights or {}).items()
+        }
+        if any(
+            not math.isfinite(weight) or weight < 0
+            for weight in self.l2sp_layer_weights.values()
+        ):
+            raise ValueError("L2-SP layer weights must be finite and non-negative")
         self.actor_value_coef = float(actor_value_coef)
         self.awr_temperature = float(awr_temperature)
         self.awr_min_weight = float(awr_min_weight)
@@ -215,18 +225,38 @@ class Stage1B1Agent(MultiTaskAgent):
     def _l2sp(self):
         if self._backbone_anchor is None:
             raise RuntimeError("B1 backbone anchor has not been captured")
-        terms = []
+        weighted_squared_error = None
+        weighted_parameter_count = 0.0
         for prefix, module in (
             ("tstep_encoder", self.tstep_encoder),
             ("traj_encoder", self.traj_encoder),
         ):
             for name, parameter in module.named_parameters():
-                terms.append(
-                    (parameter - self._backbone_anchor[f"{prefix}.{name}"])
-                    .square()
-                    .mean()
+                full_name = f"{prefix}.{name}"
+                matching_prefixes = (
+                    key
+                    for key in self.l2sp_layer_weights
+                    if full_name == key or full_name.startswith(key + ".")
                 )
-        return torch.stack(terms).mean()
+                match = max(matching_prefixes, key=len, default=None)
+                weight = self.l2sp_layer_weights.get(match, 1.0)
+                if weight == 0:
+                    continue
+                term = (
+                    parameter - self._backbone_anchor[full_name]
+                ).square().sum() * weight
+                weighted_squared_error = (
+                    term
+                    if weighted_squared_error is None
+                    else weighted_squared_error + term
+                )
+                weighted_parameter_count += weight * parameter.numel()
+        if weighted_squared_error is None or weighted_parameter_count <= 0:
+            raise RuntimeError("L2-SP layer weights exclude the entire backbone")
+        # A parameter-count-normalized penalty has a stable interpretation when
+        # layer widths change. Prefix weights can then deliberately protect
+        # selected modules without accidentally over-weighting every small bias.
+        return weighted_squared_error / weighted_parameter_count
 
     def _teacher_policy(self, batch):
         if self._epoch475_teacher is None:
@@ -352,8 +382,9 @@ def _validate(experiment, loader, phase: int, seed: int):
     totals = {}
     batches = 0
     # RLDataset ignores sampler indices and samples with Python's random module.
-    # Re-seed and restore it so early stopping compares the same held-out replay
-    # windows without perturbing the training sampler.
+    # The caller supplies a new deterministic seed for every validation pass,
+    # so early stopping observes fresh held-out trajectories and windows without
+    # perturbing the training sampler.
     random_state = random.getstate()
     random.seed(seed + experiment.accelerator.process_index)
     try:
@@ -375,6 +406,41 @@ def _validate(experiment, loader, phase: int, seed: int):
     # constrained objective rather than silently ignoring drift penalties.
     metric = averaged["B1/WLD CE"] if phase == 1 else averaged["Loss"]
     return metric, averaged
+
+
+def _atomic_torch_save(value, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(value, tmp)
+    os.replace(tmp, path)
+
+
+def _save_best_state(experiment, policy, policy_path: Path, training_path: Path):
+    if not experiment.accelerator.is_main_process:
+        return
+    policy_state = policy.state_dict()
+    # The training bundle is authoritative: putting policy, optimizer, and
+    # scheduler in one atomic file guarantees they always describe the same
+    # accepted validation candidate, even if the process is interrupted while
+    # writing the convenient policy-only export below.
+    _atomic_torch_save(
+        {
+            "policy": policy_state,
+            "optimizer": experiment.optimizer.state_dict(),
+            "lr_schedule": experiment.lr_schedule.state_dict(),
+        },
+        training_path,
+    )
+    _atomic_torch_save(policy_state, policy_path)
+
+
+def _restore_best_state(experiment, policy, training_path: Path):
+    training_state = torch.load(
+        training_path, map_location=experiment.DEVICE, weights_only=True
+    )
+    policy.load_state_dict(training_state["policy"])
+    experiment.optimizer.load_state_dict(training_state["optimizer"])
+    experiment.lr_schedule.load_state_dict(training_state["lr_schedule"])
 
 
 def run_staged_b1(
@@ -410,20 +476,46 @@ def run_staged_b1(
         (3, "actor", actor_epochs, actor_patience),
     )
     global_epoch = 0
+    validation_round = 0
     for phase, name, max_epochs, patience in phase_specs:
         policy.set_b1_phase(phase)
         if phase == 3:
             policy.capture_phase2_reference()
         best_path = Path(experiment.ckpt_dir) / "policy_weights" / f"policy_{name}_best.pt"
-        best_metric = float("inf")
+        best_training_path = (
+            Path(experiment.ckpt_dir) / "training_states" / f"training_{name}_best.pt"
+        )
+        # The phase-entry policy is a real candidate. This prevents the first
+        # update after unfreezing the backbone or actor from becoming an
+        # automatically accepted regression.
+        best_metric, metrics = _validate(
+            experiment,
+            loader,
+            phase,
+            seed=validation_seed + validation_round * 1_000_003,
+        )
+        validation_round += 1
+        experiment.log(metrics, key=f"b1-validation-{name}")
+        _save_best_state(
+            experiment, policy, best_path, best_training_path
+        )
+        print(
+            f"[B1Validation] phase={name} epoch=initial "
+            f"global_epoch={global_epoch} metric={best_metric:.6f} "
+            f"best={best_metric:.6f}"
+        )
         stale = 0
         for local_epoch in range(max_epochs):
             experiment.epoch = global_epoch
             experiment.epochs = global_epoch + 1
             experiment.learn()
             metric, metrics = _validate(
-                experiment, loader, phase, seed=validation_seed
+                experiment,
+                loader,
+                phase,
+                seed=validation_seed + validation_round * 1_000_003,
             )
+            validation_round += 1
             experiment.log(metrics, key=f"b1-validation-{name}")
             print(
                 f"[B1Validation] phase={name} epoch={local_epoch} "
@@ -432,10 +524,9 @@ def run_staged_b1(
             if metric < best_metric - min_delta:
                 best_metric = metric
                 stale = 0
-                if experiment.accelerator.is_main_process:
-                    tmp = best_path.with_suffix(".pt.tmp")
-                    torch.save(policy.state_dict(), tmp)
-                    os.replace(tmp, best_path)
+                _save_best_state(
+                    experiment, policy, best_path, best_training_path
+                )
             else:
                 stale += 1
             global_epoch += 1
@@ -446,9 +537,26 @@ def run_staged_b1(
                 )
                 break
         experiment.accelerator.wait_for_everyone()
-        policy.load_state_dict(
-            torch.load(best_path, map_location=experiment.DEVICE, weights_only=True)
-        )
+        _restore_best_state(experiment, policy, best_training_path)
         if phase == 2:
             policy.capture_phase2_reference()
+    # The in-memory model has just been restored to the best phase-3 candidate.
+    # Publish that exact state to both the explicit final path and the standard
+    # AMAGO discovery paths; otherwise latest/policy.pt would remain the final
+    # rejected epoch written inside Experiment.learn().
+    experiment.accelerator.wait_for_everyone()
+    if experiment.accelerator.is_main_process:
+        final_state = policy.state_dict()
+        policy_dir = Path(experiment.ckpt_dir) / "policy_weights"
+        _atomic_torch_save(final_state, policy_dir / "policy_final_best.pt")
+        _atomic_torch_save(final_state, policy_dir / f"policy_epoch_{global_epoch}.pt")
+        _atomic_torch_save(
+            final_state, Path(experiment.ckpt_dir) / "latest" / "policy.pt"
+        )
+        print(
+            f"[B1Final] published best actor policy as policy_final_best.pt, "
+            f"policy_epoch_{global_epoch}.pt, and latest/policy.pt"
+        )
+    experiment.accelerator.wait_for_everyone()
+    experiment.epoch = global_epoch
     experiment.epochs = global_epoch
