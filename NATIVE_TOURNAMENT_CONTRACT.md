@@ -26,7 +26,9 @@ WebSocket Showdown server.
    cache**. The actor is the configured `MetamonMaskedResidualActor` with
    `pass_obs_keys_to_actor = ["illegal_actions"]`. Evaluation runs with
    `sample=True` (categorical policy sampling), rather than deterministic
-   greedy action selection.
+   greedy action selection. The CLI's `--seed` seeds both the native
+   simulator's team/battle RNG and the policy's PyTorch sampling RNG after
+   loading the two policies.
 5. `UniversalAction.action_idx_to_BattleOrder` decodes the model's
    discrete action in Metamon's **canonical sorted move/switch order**. It
    becomes a Showdown-style string via `metamon/env/vectorized/action_adapter.py` and then the native Zig
