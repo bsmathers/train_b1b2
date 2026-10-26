@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 import metamon.backend
 from metamon.env.metamon_battle import MetamonBackendBattle
+from metamon.env.vectorized.native_legal import canonical_legal_indices
 from metamon.interface import (
     ActionSpace,
     UniversalAction,
@@ -278,21 +279,4 @@ class StreamBattleLane:
             for action in legal_actions
         ]
 
-        # Native Zig can require an automatic action even though the Pokémon
-        # still knows four ordinary moves (recharge / Rage / Thrash / charge).
-        # The private request exposes the canonical pseudo-move understood by
-        # Metamon; the actor must see exactly one selectable move index.
-        # Otherwise UniversalAction's special recharge handling aliases *all*
-        # model indices, including switches, to the same forced action.
-        req = self.last_request[side] or {}
-        active = req.get("active") or []
-        request_moves = active[0].get("moves") or [] if active else []
-        if len(request_moves) == 1:
-            pseudo = str(request_moves[0].get("id", "")).lower()
-            if pseudo in ("recharge", "fight"):
-                return [0]
-            if pseudo == "struggle":
-                return sorted(
-                    {0, *(int(idx) for idx in encoded if 4 <= int(idx) <= 8)}
-                )
-        return encoded
+        return canonical_legal_indices(encoded, self.last_request[side])
