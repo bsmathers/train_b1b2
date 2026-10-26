@@ -193,7 +193,7 @@ def main():
     parser.add_argument("--gpus", type=int, nargs="+", default=[0])
     parser.add_argument("--epochs", type=int, nargs="*", help="B1 epochs (default: all saved)")
     parser.add_argument("--base-epochs", type=int, nargs="+", default=[475])
-    parser.add_argument("--alphas", type=float, nargs="+", default=[0.2, 0.4, 0.6, 0.8, 1.0])
+    parser.add_argument("--alphas", type=float, nargs="+", default=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--battles-per-side", type=int, default=50)
     parser.add_argument("--max-concurrent", type=int, default=1)
@@ -203,8 +203,8 @@ def main():
     args = parser.parse_args()
     if args.battles_per_side < 1 or args.top_k < 1 or args.max_concurrent < 1:
         parser.error("battle count, top-k and concurrency must be positive")
-    if not args.gpus or any(not 0.0 < alpha <= 1.0 for alpha in args.alphas):
-        parser.error("At least one GPU and all alphas in (0,1] are required")
+    if not args.gpus or any(not 0.0 <= alpha <= 1.0 for alpha in args.alphas):
+        parser.error("At least one GPU and all alphas in [0,1] are required")
     args.save_dir = args.save_dir.resolve()
     args.taurosv1_dir = (args.taurosv1_dir or args.save_dir).resolve()
     args.cache_dir = args.cache_dir.resolve()
@@ -256,7 +256,8 @@ def main():
             parser.error("No completed B1 candidates")
     from metamon.rl.stage1_b2_select import generate_interpolations
     combinations = [(base, b1, alpha) for base in sorted(set(args.base_epochs))
-                    for b1 in b1_choice for alpha in sorted(set(args.alphas))]
+                    for b1 in b1_choice for alpha in sorted(set(args.alphas))
+                    if alpha != 0.0 or b1 == b1_choice[0]]
     b2_manifest = generate_interpolations(
         combinations, args.taurosv1_dir, args.save_dir, args.run_name,
         args.b2_run_name, dry_run=args.dry_run)
