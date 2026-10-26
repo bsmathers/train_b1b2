@@ -76,9 +76,29 @@ function createEngineRequest(engineBattle, gen, sideId, playerName, res, origina
     }
     const alias = volatiles.recharging ? "recharge" : "fight";
     return {
-      active: [{ moves: [{
+      active: [{ trapped: true, moves: [{
         move: alias === "recharge" ? "Recharge" : "Fight",
         id: alias,
+        pp: 1,
+        maxpp: 1,
+        target: "normal",
+        disabled: false,
+      }] }],
+      side: sideObj,
+    };
+  }
+
+  // Struggle is a native move-0 special case. The stored moves are all
+  // unusable; advertising them as selectable produces an all-illegal actor
+  // mask. Metamon already understands the synthetic 'struggle' move.
+  if (legalMoveSlots.has(0)) {
+    if (legalMoveSlots.size !== 1) {
+      throw new Error("Native Struggle choice must be the sole move option");
+    }
+    return {
+      active: [{ moves: [{
+        move: "Struggle",
+        id: "struggle",
         pp: 1,
         maxpp: 1,
         target: "normal",
