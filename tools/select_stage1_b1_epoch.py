@@ -187,6 +187,13 @@ def run_native_tournament(entries, output, args):
     }
     validate_manifest(output, manifest)
     tracker = ResultsTracker(str(output))
+    # Fail before scheduling hundreds of workers if the native addon is missing.
+    if not args.dry_run:
+        import shutil as _shutil
+        from metamon.rl.evaluate.native_matchup import require_native_engine
+        if _shutil.which("node") is None:
+            raise RuntimeError("Node.js not found; run ./tools/setup_pkmn_engine.sh")
+        require_native_engine()
     for candidate, own, other, reverse, spec in entries:
         if args.dry_run:
             print(
@@ -233,6 +240,9 @@ def run_native_tournament(entries, output, args):
             )
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            # Keep parity with the B1 CUDA launcher, which disables a
+            # torch.compile path known to fail for this AMAGO configuration.
+            env.setdefault("TORCHDYNAMO_DISABLE", "1")
             cmd = [
                 sys.executable, "-u", "-m",
                 "metamon.rl.evaluate.native_matchup",
@@ -304,11 +314,14 @@ def run_native_tournament(entries, output, args):
         finally:
             gpu_slots.put(gpu)
 
+    first_error = None
     with ThreadPoolExecutor(
         max_workers=min(args.max_concurrent, len(args.gpus))
     ) as pool:
         futures = {pool.submit(play, entry): entry for entry in remaining}
         for future in as_completed(futures):
+            if future.cancelled():
+                continue
             entry = futures[future]
             try:
                 result = future.result()
@@ -321,7 +334,17 @@ def run_native_tournament(entries, output, args):
                 )
             except Exception as exc:
                 print(f"FAILED {entry[0]} {entry[1]}/{entry[2]}: {exc}", flush=True)
-                # Do not select a checkpoint from partially completed battles.
+                # Stop at the first failure instead of attempting hundreds of
+                # broken matches with the same dependency/configuration error.
+                if first_error is None:
+                    first_error = exc
+                    for pending in futures:
+                        pending.cancel()
+    if first_error is not None:
+        raise RuntimeError(
+            "Native tournament failed; inspect the native.log named above, "
+            "fix the cause, and rerun to resume completed matchups."
+        ) from first_error
     rows = score_tournament(entries, tracker.get_all_results(), output)
     if any(not r["complete"] for r in rows):
         raise RuntimeError(
