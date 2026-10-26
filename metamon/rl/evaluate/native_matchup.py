@@ -76,7 +76,6 @@ def finish_score(done, truncated, info, lane: int) -> float:
     return 1.0 if won[lane] else 0.0
 
 
-
 def validate_native_inputs(env, obs, action_dim: int) -> None:
     """Check private request ownership and the exact model legality mask.
 
@@ -102,9 +101,7 @@ def validate_native_inputs(env, obs, action_dim: int) -> None:
                         f"Native private team leaked/mislabeled lane={i} side={side}: "
                         f"{pokemon.get('ident')!r}"
                     )
-        legal = set(
-            lane.legal_action_indices(env.eval_side, env.eval_action_space)
-        )
+        legal = set(lane.legal_action_indices(env.eval_side, env.eval_action_space))
         if not legal:
             raise RuntimeError(
                 f"Native evaluation lane={i} has no legal action at decision"
@@ -194,9 +191,7 @@ def run(args):
                     f"Native matchup exceeded {args.max_steps} vector steps; "
                     f"finished {len(scores)} of {args.battles} games"
                 )
-            validate_native_inputs(
-                env, obs, candidate_model.action_space.gym_space.n
-            )
+            validate_native_inputs(env, obs, candidate_model.action_space.gym_space.n)
             active = np.ones(lanes, dtype=bool)
             actions = candidate.act(active, unstack_obs_dicts(obs))
             obs, reward, terminated, truncated, info = env.step(actions)

@@ -474,9 +474,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._committed_side_actions[(i, side)] = int(used_idx)
         self.proc.choose(i, side, choice)
 
-    def _choose_opponent_side(
-        self, i: int
-    ) -> Tuple[int, int, UniversalState]:
+    def _choose_opponent_side(self, i: int) -> Tuple[int, int, UniversalState]:
         """Answer an opponent-only decision and return its RL2 feedback record.
 
         An opponent action is a genuine model decision even when the evaluated

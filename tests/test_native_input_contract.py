@@ -1,9 +1,9 @@
 """Pure-Python contract tests for the tournament's per-policy private inputs."""
+
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-
 
 source = Path(__file__).resolve().parents[1] / "metamon/rl/evaluate/native_matchup.py"
 spec = importlib.util.spec_from_file_location("_native_matchup_contract", source)
@@ -14,12 +14,18 @@ spec.loader.exec_module(native)
 class FakeLane:
     def __init__(self):
         self.last_request = {
-            "p1": {"side": {"id": "p1", "pokemon": [
-                {"ident": "p1: Tauros"}, {"ident": "p1: Snorlax"}
-            ]}},
-            "p2": {"side": {"id": "p2", "pokemon": [
-                {"ident": "p2: Chansey"}, {"ident": "p2: Starmie"}
-            ]}},
+            "p1": {
+                "side": {
+                    "id": "p1",
+                    "pokemon": [{"ident": "p1: Tauros"}, {"ident": "p1: Snorlax"}],
+                }
+            },
+            "p2": {
+                "side": {
+                    "id": "p2",
+                    "pokemon": [{"ident": "p2: Chansey"}, {"ident": "p2: Starmie"}],
+                }
+            },
         }
 
     def legal_action_indices(self, side, action_space):
@@ -35,9 +41,7 @@ class NativeInputContractTests(unittest.TestCase):
             eval_side="p1",
             eval_action_space=object(),
         )
-        self.obs = {"illegal_actions": [
-            [False, True, False, True, False] + [True] * 8
-        ]}
+        self.obs = {"illegal_actions": [[False, True, False, True, False] + [True] * 8]}
 
     def test_correct_private_requests_and_mask(self):
         native.validate_native_inputs(self.env, self.obs, 13)
