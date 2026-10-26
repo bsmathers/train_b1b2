@@ -60,6 +60,11 @@ const sets = roster.map(([species, moves]) => ({
   // Zig keeps the active mon in CURRENT slot 1. Its Side.slot(originalId)
   // translates a stable Showdown party position to the native 2..6 slot.
   const sideAfter = battle.side("p1");
+  const byCurrentSlot = Array.from(sideAfter.pokemon);
+  const byOriginalPosition = byCurrentSlot.slice().sort((a, b) => a.position - b.position);
+  assert.equal(byOriginalPosition[0].stored.species, "tauros");
+  assert.notEqual(byCurrentSlot[0].position, byOriginalPosition[0].position,
+    "A switch must reorder dynamic slots without changing original identities");
   const dynamicLead = sideAfter.slot(1);
   assert.ok(dynamicLead >= 2 && dynamicLead <= 6,
     "Original party slot 1 should now be a switchable bench Pokemon");
