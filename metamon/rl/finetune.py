@@ -81,7 +81,11 @@ from metamon.rl.dataset_config import (
 )
 from metamon.rl.pretrained import get_pretrained_model_names, get_pretrained_model
 from metamon.interface import get_reward_function_names, get_reward_function
-from metamon.rl.stage1_b1 import Stage1B1Agent, run_staged_b1
+from metamon.rl.stage1_b1 import (
+    Stage1B1Agent,
+    run_epoch20_actor_refinement,
+    run_staged_b1,
+)
 
 
 def _install_fast_interrupt_handler() -> None:
@@ -176,6 +180,13 @@ def add_cli(parser):
     )
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-3)
     parser.add_argument("--stage1_b1_pipeline", action="store_true")
+    parser.add_argument("--stage1_b1_actor_refinement", action="store_true")
+    parser.add_argument(
+        "--b1_phase2_checkpoint",
+        type=str,
+        default=None,
+        help="Best Phase-2 policy used to initialize standalone actor refinement.",
+    )
     parser.add_argument("--b1_value_head_epochs", type=int, default=100)
     parser.add_argument("--b1_value_backbone_epochs", type=int, default=1000)
     parser.add_argument("--b1_actor_epochs", type=int, default=1000)
@@ -492,6 +503,8 @@ if __name__ == "__main__":
         print(f"  Loading weights from: {ckpt_path}")
         experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
 
+        if args.stage1_b1_pipeline and args.stage1_b1_actor_refinement:
+            raise ValueError("select either the B1 value pipeline or actor refinement")
         if args.stage1_b1_pipeline:
             if validation_dataset is None:
                 raise ValueError("staged B1 requires --validation_fraction > 0")
@@ -502,17 +515,28 @@ if __name__ == "__main__":
                 validation_seed=args.validation_seed,
                 phase1_epochs=args.b1_value_head_epochs,
                 phase2_epochs=args.b1_value_backbone_epochs,
-                actor_epochs=args.b1_actor_epochs,
                 phase1_steps_per_epoch=args.b1_value_head_steps_per_epoch,
                 phase2_steps_per_epoch=(
                     args.b1_value_backbone_steps_per_epoch or args.steps_per_epoch
                 ),
-                actor_steps_per_epoch=(
-                    args.b1_actor_steps_per_epoch or args.steps_per_epoch
-                ),
                 phase1_patience=args.b1_value_head_patience,
                 phase2_patience=args.b1_value_backbone_patience,
-                actor_patience=args.b1_actor_patience,
+                min_delta=args.early_stopping_min_delta,
+            )
+        elif args.stage1_b1_actor_refinement:
+            if validation_dataset is None:
+                raise ValueError("B1 actor refinement requires --validation_fraction > 0")
+            if args.b1_phase2_checkpoint is None:
+                raise ValueError("B1 actor refinement requires --b1_phase2_checkpoint")
+            run_epoch20_actor_refinement(
+                experiment=experiment,
+                validation_dataset=validation_dataset,
+                phase2_checkpoint=args.b1_phase2_checkpoint,
+                validation_batches=args.validation_batches,
+                validation_seed=args.validation_seed,
+                max_epochs=args.b1_actor_epochs,
+                steps_per_epoch=(args.b1_actor_steps_per_epoch or args.steps_per_epoch),
+                patience=args.b1_actor_patience,
                 min_delta=args.early_stopping_min_delta,
             )
         elif validation_dataset is None:

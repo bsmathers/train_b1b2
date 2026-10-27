@@ -19,11 +19,10 @@ fi
 DATASET_CONFIG="${DATASET_CONFIG:-${ROOT_DIR}/metamon/rl/configs/datasets/stage1_b1_strong.yaml}"
 SAVE_DIR="${SAVE_DIR:-${ROOT_DIR}/checkpoints}"
 RUN_NAME="${RUN_NAME:-stage1_b1}"
-EPOCHS="${EPOCHS:-2100}"
+EPOCHS="${EPOCHS:-1100}"
 STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-1000}"
 B1_VALUE_HEAD_STEPS_PER_EPOCH="${B1_VALUE_HEAD_STEPS_PER_EPOCH:-1000}"
 B1_VALUE_BACKBONE_STEPS_PER_EPOCH="${B1_VALUE_BACKBONE_STEPS_PER_EPOCH:-1000}"
-B1_ACTOR_STEPS_PER_EPOCH="${B1_ACTOR_STEPS_PER_EPOCH:-1000}"
 BATCH_SIZE="${BATCH_SIZE:-12}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 DLOADER_WORKERS="${DLOADER_WORKERS:-8}"
@@ -145,12 +144,9 @@ exec "${PYTHON_BIN}" -m metamon.rl.finetune \
     --stage1_b1_pipeline \
     --b1_value_head_epochs 100 \
     --b1_value_backbone_epochs 1000 \
-    --b1_actor_epochs 1000 \
     --b1_value_head_steps_per_epoch "${B1_VALUE_HEAD_STEPS_PER_EPOCH}" \
     --b1_value_backbone_steps_per_epoch "${B1_VALUE_BACKBONE_STEPS_PER_EPOCH}" \
-    --b1_actor_steps_per_epoch "${B1_ACTOR_STEPS_PER_EPOCH}" \
     --b1_value_head_patience 3 \
     --b1_value_backbone_patience 5 \
-    --b1_actor_patience 5 \
     --eval_gens \
     ${LOG_ARG}
