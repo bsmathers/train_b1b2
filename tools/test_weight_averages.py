@@ -90,10 +90,16 @@ def main() -> None:
         parser.error(f"no numbered checkpoints found in {policy_dir}")
 
     windows = sorted(set(args.windows))
-    if windows[-1] > len(numbered):
-        parser.error(
-            f"requested window {windows[-1]} but only {len(numbered)} numbered checkpoints exist"
+    skipped_windows = [window for window in windows if window > len(numbered)]
+    windows = [window for window in windows if window <= len(numbered)]
+    if skipped_windows:
+        print(
+            f"Skipping averaging windows {skipped_windows}; only "
+            f"{len(numbered)} numbered checkpoints exist",
+            flush=True,
         )
+    if not windows:
+        parser.error("at least two numbered checkpoints are required for averaging")
     output_dir.mkdir(parents=True, exist_ok=True)
     averages_dir = output_dir / "averaged_checkpoints"
     candidates = [("published_best", published_best.resolve(), [])]
