@@ -1,0 +1,8 @@
+# Second actor-refinement round: only trajectories whose perspective player is
+# Tauros-v2, Tauros-v3, SmallG1Online-v2, or SmallG1Online-v3.
+replay_weight: 0.0
+custom_replays:
+  - dir: ${SELECTED_STRONG_REPLAYS_DIR}
+    weight: 1.0
+formats:
+  - gen1ou
