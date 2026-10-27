@@ -83,8 +83,9 @@ from metamon.rl.pretrained import get_pretrained_model_names, get_pretrained_mod
 from metamon.interface import get_reward_function_names, get_reward_function
 from metamon.rl.stage1_b1 import (
     Stage1B1Agent,
-    run_epoch20_actor_refinement,
+    run_actor_refinement,
     run_staged_b1,
+    run_value_head_refit,
 )
 
 
@@ -181,6 +182,13 @@ def add_cli(parser):
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-3)
     parser.add_argument("--stage1_b1_pipeline", action="store_true")
     parser.add_argument("--stage1_b1_actor_refinement", action="store_true")
+    parser.add_argument("--stage1_b1_value_head_refit", action="store_true")
+    parser.add_argument(
+        "--b1_anchor_checkpoint",
+        type=str,
+        default=None,
+        help="Exact B1 policy checkpoint to load and capture as the immutable anchor.",
+    )
     parser.add_argument(
         "--b1_phase2_checkpoint",
         type=str,
@@ -229,6 +237,15 @@ def add_cli(parser):
 
 def _resolve_checkpoint_path(args, pretrained):
     """Return the path to the policy weights file to load."""
+    if args.b1_anchor_checkpoint is not None:
+        if args.prev_run_dir is not None:
+            raise ValueError(
+                "--b1_anchor_checkpoint and --prev_run_dir are mutually exclusive"
+            )
+        anchor = os.path.abspath(os.path.expanduser(args.b1_anchor_checkpoint))
+        if not os.path.isfile(anchor):
+            raise FileNotFoundError(f"B1 anchor checkpoint was not found: {anchor}")
+        return anchor
     if args.prev_run_dir is not None:
         assert (
             args.prev_run_name is not None
@@ -503,8 +520,16 @@ if __name__ == "__main__":
         print(f"  Loading weights from: {ckpt_path}")
         experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)
 
-        if args.stage1_b1_pipeline and args.stage1_b1_actor_refinement:
-            raise ValueError("select either the B1 value pipeline or actor refinement")
+        b1_modes = sum(
+            bool(mode)
+            for mode in (
+                args.stage1_b1_pipeline,
+                args.stage1_b1_actor_refinement,
+                args.stage1_b1_value_head_refit,
+            )
+        )
+        if b1_modes > 1:
+            raise ValueError("select exactly one B1 training mode")
         if args.stage1_b1_pipeline:
             if validation_dataset is None:
                 raise ValueError("staged B1 requires --validation_fraction > 0")
@@ -523,12 +548,29 @@ if __name__ == "__main__":
                 phase2_patience=args.b1_value_backbone_patience,
                 min_delta=args.early_stopping_min_delta,
             )
+        elif args.stage1_b1_value_head_refit:
+            if validation_dataset is None:
+                raise ValueError("B1 value-head refit requires --validation_fraction > 0")
+            if args.b1_anchor_checkpoint is None:
+                raise ValueError("B1 value-head refit requires --b1_anchor_checkpoint")
+            run_value_head_refit(
+                experiment=experiment,
+                validation_dataset=validation_dataset,
+                validation_batches=args.validation_batches,
+                validation_seed=args.validation_seed,
+                max_epochs=args.b1_value_head_epochs,
+                steps_per_epoch=args.b1_value_head_steps_per_epoch,
+                patience=args.b1_value_head_patience,
+                min_delta=args.early_stopping_min_delta,
+            )
         elif args.stage1_b1_actor_refinement:
             if validation_dataset is None:
                 raise ValueError("B1 actor refinement requires --validation_fraction > 0")
             if args.b1_phase2_checkpoint is None:
                 raise ValueError("B1 actor refinement requires --b1_phase2_checkpoint")
-            run_epoch20_actor_refinement(
+            if args.b1_anchor_checkpoint is None:
+                raise ValueError("B1 actor refinement requires --b1_anchor_checkpoint")
+            run_actor_refinement(
                 experiment=experiment,
                 validation_dataset=validation_dataset,
                 phase2_checkpoint=args.b1_phase2_checkpoint,

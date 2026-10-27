@@ -1,0 +1,8 @@
+# Epoch-51 value recalibration: 70% full strong-bot corpus, 30% human games.
+# The launcher freezes the actor and both encoders; only the W/L/D head moves.
+replay_weight: 0.30
+custom_replays:
+  - dir: ${GOOD_REPLAYS_DIR}
+    weight: 0.70
+formats:
+  - gen1ou

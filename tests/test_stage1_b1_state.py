@@ -22,6 +22,38 @@ class _Accelerator:
 
 
 class Stage1B1StateTests(unittest.TestCase):
+    @staticmethod
+    def _minimal_agent():
+        agent = object.__new__(Stage1B1Agent)
+        nn.Module.__init__(agent)
+        agent.tstep_encoder = nn.Linear(2, 2)
+        agent.traj_encoder = nn.Linear(2, 2)
+        agent.actor = nn.Linear(2, 2)
+        agent.wld_value = nn.Linear(2, 3)
+        agent._b1_phase = Stage1B1Agent.PHASE_VALUE_HEAD
+        agent._anchor_teacher = None
+        agent._phase2_reference = None
+        agent._backbone_anchor = None
+        return agent
+
+    def test_value_refit_freezes_everything_except_wld_head(self):
+        agent = self._minimal_agent()
+        agent.set_b1_phase(Stage1B1Agent.PHASE_VALUE_HEAD)
+        self.assertTrue(all(p.requires_grad for p in agent.wld_value.parameters()))
+        for module in (agent.tstep_encoder, agent.traj_encoder, agent.actor):
+            self.assertTrue(all(not p.requires_grad for p in module.parameters()))
+
+    def test_loaded_anchor_is_an_immutable_snapshot(self):
+        agent = self._minimal_agent()
+        with torch.no_grad():
+            agent.actor.weight.fill_(5.0)
+        agent.on_checkpoint_loaded(is_resume=False)
+        teacher_actor = agent._anchor_teacher[2]
+        with torch.no_grad():
+            agent.actor.weight.zero_()
+        self.assertTrue(torch.equal(teacher_actor.weight, torch.full_like(teacher_actor.weight, 5.0)))
+        self.assertTrue(all(not p.requires_grad for p in teacher_actor.parameters()))
+
     def test_best_state_restores_policy_optimizer_and_scheduler(self):
         policy = nn.Linear(2, 1, bias=False)
         optimizer = torch.optim.AdamW(policy.parameters(), lr=0.1)

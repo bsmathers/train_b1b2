@@ -1,13 +1,13 @@
 """Staged offline B1 value training and conservative actor refinement.
 
 The value pipeline has two stages:
-  1. fit a categorical W/L/D value head on a frozen Epoch475 policy;
-  2. fit value + backbone while the actor head is frozen, with Epoch475
+  1. fit a categorical W/L/D value head on a frozen anchor policy;
+  2. fit value + backbone while the actor head is frozen, with anchor-policy
      policy KL and L2-SP protection;
 
 Actor refinement is a separate run from the best stage-2 checkpoint. It uses
 ordinary behavior cloning on strong-model actions, plus functional anchors to
-the Epoch475 policy and stage-2 value model. It deliberately does not use
+the initially loaded policy and stage-2 value model. It deliberately does not use
 trajectory outcomes as per-action advantage estimates.
 """
 
@@ -51,7 +51,7 @@ def _module_grad_norm(module: nn.Module) -> float:
 
 @gin.configurable
 class Stage1B1Agent(MultiTaskAgent):
-    """Epoch475 actor/backbone with a categorical W/L/D head and no Q critics."""
+    """Anchored actor/backbone with a categorical W/L/D head and no Q critics."""
 
     PHASE_VALUE_HEAD = 1
     PHASE_VALUE_BACKBONE = 2
@@ -98,7 +98,7 @@ class Stage1B1Agent(MultiTaskAgent):
         if sum(actor_coefficients) <= 0:
             raise ValueError("at least one actor refinement coefficient must be positive")
         self._b1_phase = self.PHASE_VALUE_HEAD
-        self._epoch475_teacher = None
+        self._anchor_teacher = None
         self._phase2_reference = None
         self._backbone_anchor = None
 
@@ -153,7 +153,7 @@ class Stage1B1Agent(MultiTaskAgent):
             if name.startswith(obsolete):
                 del state_dict[name]
         current = self.state_dict()
-        # Only the immutable Epoch475 layout is allowed to omit the new head.
+        # Only a legacy pre-B1 layout is allowed to omit the new head.
         # A damaged native B1 checkpoint must still fail strict loading.
         if loading_legacy:
             for name in ("wld_value.weight", "wld_value.bias"):
@@ -172,7 +172,11 @@ class Stage1B1Agent(MultiTaskAgent):
             raise RuntimeError(
                 "B1 staged full-state resume is not supported; restart from a saved phase checkpoint"
             )
-        self._epoch475_teacher = self._copy_modules(
+        # Whichever checkpoint the launcher explicitly loads first is the
+        # immutable functional anchor. Actor refinement may subsequently load a
+        # value-refitted derivative, but its policy KL must continue to target
+        # this exact checkpoint rather than an older architectural base model.
+        self._anchor_teacher = self._copy_modules(
             self.tstep_encoder, self.traj_encoder, self.actor
         )
         self._capture_backbone_anchor()
@@ -271,9 +275,9 @@ class Stage1B1Agent(MultiTaskAgent):
         return weighted_squared_error / weighted_parameter_count
 
     def _teacher_policy(self, batch):
-        if self._epoch475_teacher is None:
-            raise RuntimeError("Epoch475 teacher has not been captured")
-        tstep, traj, actor = self._epoch475_teacher
+        if self._anchor_teacher is None:
+            raise RuntimeError("policy anchor has not been captured")
+        tstep, traj, actor = self._anchor_teacher
         with torch.no_grad():
             teacher_o = tstep(obs=batch.obs, rl2s=batch.rl2s)
             teacher_s, _ = traj(seq=teacher_o, time_idxs=batch.time_idxs, hidden_state=None)
@@ -599,7 +603,104 @@ def _load_policy_state(path: str | Path, device: torch.device) -> dict[str, torc
     return state
 
 
-def run_epoch20_actor_refinement(
+def run_value_head_refit(
+    experiment,
+    validation_dataset,
+    validation_batches: int,
+    validation_seed: int,
+    max_epochs: int,
+    steps_per_epoch: int,
+    patience: int,
+    min_delta: float,
+):
+    """Refit only the W/L/D head of the initially loaded anchor checkpoint."""
+    if steps_per_epoch < 1:
+        raise ValueError("value-head refit steps_per_epoch must be positive")
+    policy = experiment.accelerator.unwrap_model(experiment.policy_aclr)
+    if not isinstance(policy, Stage1B1Agent):
+        raise TypeError("B1 value-head refit requires Stage1B1Agent")
+    if policy._anchor_teacher is None:
+        raise RuntimeError("anchor checkpoint must be captured before value-head refit")
+    policy.set_b1_phase(policy.PHASE_VALUE_HEAD)
+
+    validation_dataset.configure_from_experiment(experiment)
+    validation_dataset.items_per_epoch = validation_batches * experiment.batch_size
+    loader = DataLoader(
+        validation_dataset,
+        batch_size=experiment.batch_size,
+        num_workers=0,
+        collate_fn=RLData_pad_collate,
+        generator=torch.Generator().manual_seed(validation_seed),
+    )
+    loader = experiment.accelerator.prepare(loader)
+    experiment.train_batches_per_epoch = steps_per_epoch * experiment.batches_per_update
+    numbered_policy_interval = experiment.ckpt_interval
+    experiment.ckpt_interval = None
+
+    policy_dir = Path(experiment.ckpt_dir) / "policy_weights"
+    training_dir = Path(experiment.ckpt_dir) / "training_states"
+    best_path = policy_dir / "policy_value_head_refit_best.pt"
+    best_training_path = training_dir / "training_value_head_refit_best.pt"
+    best_metric, metrics = _validate(
+        experiment, loader, policy.PHASE_VALUE_HEAD, seed=validation_seed
+    )
+    experiment.log(metrics, key="b1-validation-value-head-refit")
+    _save_best_state(experiment, policy, best_path, best_training_path)
+    print(
+        "[B1ValueRefitValidation] epoch=initial global_epoch=0 "
+        f"metric={best_metric:.6f} best={best_metric:.6f}"
+    )
+
+    stale = 0
+    completed_epochs = 0
+    for epoch in range(max_epochs):
+        experiment.epoch = epoch
+        experiment.epochs = epoch + 1
+        experiment.learn()
+        _save_numbered_policy(experiment, policy, epoch, numbered_policy_interval)
+        # A fixed held-out sample makes patience react to learning rather than
+        # to replay-window sampling noise.
+        metric, metrics = _validate(
+            experiment, loader, policy.PHASE_VALUE_HEAD, seed=validation_seed
+        )
+        experiment.log(metrics, key="b1-validation-value-head-refit")
+        print(
+            f"[B1ValueRefitValidation] epoch={epoch} global_epoch={epoch} "
+            f"metric={metric:.6f} best={best_metric:.6f}"
+        )
+        if metric < best_metric - min_delta:
+            best_metric = metric
+            stale = 0
+            _save_best_state(experiment, policy, best_path, best_training_path)
+        else:
+            stale += 1
+        completed_epochs = epoch + 1
+        if patience > 0 and stale >= patience:
+            print(
+                f"[B1ValueRefitEarlyStop] epoch={epoch} best={best_metric:.6f} "
+                f"patience={patience}"
+            )
+            break
+
+    experiment.accelerator.wait_for_everyone()
+    _restore_best_state(experiment, policy, best_training_path)
+    if experiment.accelerator.is_main_process:
+        final_state = policy.state_dict()
+        _atomic_torch_save(final_state, policy_dir / "policy_value_head_refit_final.pt")
+        _atomic_torch_save(final_state, policy_dir / f"policy_epoch_{completed_epochs}.pt")
+        _atomic_torch_save(final_state, Path(experiment.ckpt_dir) / "latest" / "policy.pt")
+        print(
+            "[B1ValueRefitFinal] published restored validation-best value head as "
+            f"policy_value_head_refit_final.pt, policy_epoch_{completed_epochs}.pt, "
+            "and latest/policy.pt"
+        )
+    experiment.accelerator.wait_for_everyone()
+    experiment.epoch = completed_epochs
+    experiment.epochs = completed_epochs
+    experiment.ckpt_interval = numbered_policy_interval
+
+
+def run_actor_refinement(
     experiment,
     validation_dataset,
     phase2_checkpoint: str,
@@ -610,11 +711,12 @@ def run_epoch20_actor_refinement(
     patience: int,
     min_delta: float,
 ):
-    """Refine Phase 2 with plain BC and fixed functional anchors.
+    """Refine a value-fitted model with plain BC and fixed anchors.
 
-    The experiment has already loaded Epoch475, causing ``on_checkpoint_loaded``
-    to capture the immutable policy teacher. Loading Phase 2 here changes only
-    the live model. The optimizer and scheduler are new for this run.
+    The experiment first loads the requested anchor checkpoint, causing
+    ``on_checkpoint_loaded`` to capture its immutable policy teacher. Loading
+    the value-fitted derivative here changes only the live model. The optimizer
+    and scheduler are new for this run.
     """
     if steps_per_epoch < 1:
         raise ValueError("actor refinement steps_per_epoch must be positive")
@@ -625,8 +727,8 @@ def run_epoch20_actor_refinement(
     policy = experiment.accelerator.unwrap_model(experiment.policy_aclr)
     if not isinstance(policy, Stage1B1Agent):
         raise TypeError("B1 actor refinement requires Stage1B1Agent")
-    if policy._epoch475_teacher is None:
-        raise RuntimeError("Epoch475 teacher must be captured before loading Phase 2")
+    if policy._anchor_teacher is None:
+        raise RuntimeError("policy anchor must be captured before loading value model")
     policy.load_state_dict(_load_policy_state(phase2_path, experiment.DEVICE), strict=True)
     policy.capture_phase2_reference()
     policy.set_b1_phase(policy.PHASE_ACTOR)

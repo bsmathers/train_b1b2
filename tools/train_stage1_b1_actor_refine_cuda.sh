@@ -17,6 +17,7 @@ SAVE_DIR="${SAVE_DIR:-${ROOT_DIR}/checkpoints}"
 SOURCE_RUN_NAME="${SOURCE_RUN_NAME:-stage1_b1}"
 RUN_NAME="${RUN_NAME:-stage1_b1_actor_bc}"
 PHASE2_CHECKPOINT="${PHASE2_CHECKPOINT:-${SAVE_DIR}/${SOURCE_RUN_NAME}/ckpts/policy_weights/policy_value_backbone_best.pt}"
+ANCHOR_CHECKPOINT="${ANCHOR_CHECKPOINT:-${PHASE2_CHECKPOINT}}"
 DATASET_CONFIG="${DATASET_CONFIG:-${ROOT_DIR}/metamon/rl/configs/datasets/stage1_b1_strong_only.yaml}"
 EPOCHS="${EPOCHS:-1000}"
 STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-1000}"
@@ -30,6 +31,10 @@ CKPT_INTERVAL="${CKPT_INTERVAL:-1}"
 mkdir -p "${METAMON_CACHE_DIR}" "${SAVE_DIR}"
 if [ ! -f "${PHASE2_CHECKPOINT}" ]; then
     echo "ERROR: Phase-2 checkpoint not found: ${PHASE2_CHECKPOINT}" >&2
+    exit 1
+fi
+if [ ! -f "${ANCHOR_CHECKPOINT}" ]; then
+    echo "ERROR: actor anchor checkpoint not found: ${ANCHOR_CHECKPOINT}" >&2
     exit 1
 fi
 if [ -e "${SAVE_DIR}/${RUN_NAME}" ]; then
@@ -74,7 +79,8 @@ if [ -n "${WANDB_API_KEY:-}" ]; then
 fi
 
 echo "Starting clean Epoch20-style actor refinement"
-echo "  Phase-2 source: ${PHASE2_CHECKPOINT}"
+echo "  Immutable policy anchor: ${ANCHOR_CHECKPOINT}"
+echo "  Live value-model source: ${PHASE2_CHECKPOINT}"
 echo "  Strong trajectories: ${GOOD_REPLAYS_DIR}"
 echo "  New run: ${SAVE_DIR}/${RUN_NAME}"
 
@@ -100,6 +106,7 @@ exec "${PYTHON_BIN}" -m metamon.rl.finetune \
     --early_stopping_min_delta 0.001 \
     --stage1_b1_actor_refinement \
     --b1_phase2_checkpoint "${PHASE2_CHECKPOINT}" \
+    --b1_anchor_checkpoint "${ANCHOR_CHECKPOINT}" \
     --b1_actor_epochs "${EPOCHS}" \
     --b1_actor_steps_per_epoch "${STEPS_PER_EPOCH}" \
     --b1_actor_patience "${PATIENCE}" \
