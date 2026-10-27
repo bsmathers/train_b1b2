@@ -1,0 +1,7 @@
+include 'metamon/rl/configs/models/grouped_v2_medium_cuda.gin'
+import metamon.rl.local_attention
+
+# Parameter-free, checkpoint-compatible fallback for machines without
+# FlashAttention 2.  Window 32 means 32 predecessors plus the current token.
+traj_encoders.TformerTrajEncoder.attention_type = @local_attention.PortableSlidingWindowAttention
+local_attention.PortableSlidingWindowAttention.window_size = 32

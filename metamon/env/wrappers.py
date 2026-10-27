@@ -83,6 +83,10 @@ class TeamSet(Teambuilder):
         else:
             print(f"Found {len(self.team_files):,} teams in TeamSet")
         self._most_recent_team_file = None
+        # Do not use Python's process-global RNG here. Native evaluation runs
+        # each physical side in a separate process and relies on env.reset(seed)
+        # to reproduce the same candidate/opponent team draws on both sides.
+        self._rng = random.Random()
         # Normalizing a team file (correct per-gen stat defaults via
         # team_prediction) is comparatively expensive and runs on every battle
         # reset. Team files are static, so cache the resulting packed team per
@@ -139,7 +143,7 @@ class TeamSet(Teambuilder):
     def yield_team(self) -> str:
         for attempt in range(100):
             # sample a team file
-            file = random.choice(self.team_files)
+            file = self._rng.choice(self.team_files)
             self._most_recent_team_file = file
             # cached packed team (parse/normalize once per file)
             candidate_team = self._packed_team_cache.get(file)
@@ -152,6 +156,10 @@ class TeamSet(Teambuilder):
             if attempt % 10 == 0:
                 warnings.warn(f"Failed to find valid team after {attempt + 1} attempts")
         raise RuntimeError(f"Could not find valid team after 100 attempts")
+
+    def seed(self, seed: Optional[int]) -> None:
+        """Seed this set's private sampler without perturbing other components."""
+        self._rng.seed(seed)
 
 
 class PokeAgentTeamSet(TeamSet):

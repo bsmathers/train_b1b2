@@ -1,0 +1,5 @@
+include 'metamon/rl/configs/models/grouped_v2_50m.gin'
+import metamon.rl.local_attention
+
+traj_encoders.TformerTrajEncoder.attention_type = @local_attention.PortableSlidingWindowAttention
+local_attention.PortableSlidingWindowAttention.window_size = 32

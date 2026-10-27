@@ -27,7 +27,7 @@ class FakeLocalFinetunedModel:
 
 
 class NativeBaseModelTests(unittest.TestCase):
-    def test_parent_checkpoint_uses_same_cuda_architecture_as_b1(self):
+    def test_parent_checkpoint_uses_same_checkpoint_compatible_architecture_as_b1(self):
         fake = types.ModuleType("metamon.rl.pretrained")
         fake.LocalFinetunedModel = FakeLocalFinetunedModel
         fake.TaurosV1 = FakeTaurosV1
@@ -42,7 +42,8 @@ class NativeBaseModelTests(unittest.TestCase):
                     self.assertEqual(parent.options["model_name"], "mediumg1online")
                     self.assertEqual(parent.options["default_checkpoint"], 475)
                     self.assertEqual(
-                        parent.options["model_gin_config"], "grouped_v2_medium_cuda.gin"
+                        parent.options["model_gin_config"],
+                        native.portable_model_config("grouped_v2_medium_cuda.gin"),
                     )
                     self.assertEqual(
                         parent.options["train_gin_config"], "stage1_b1_imitation.gin"

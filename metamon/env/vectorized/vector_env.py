@@ -155,6 +155,8 @@ class VectorizedShowdownEnv(gym.Env):
         )
 
         self._rng = random.Random(seed)
+        self._base_seed = seed
+        self._lane_game_counts = np.zeros((self.batched_envs,), dtype=np.int64)
 
         # Per-side team-preview behavior: "default" -> Showdown autoChoose (123456),
         # "random" -> full random shuffle, "heuristic" -> teampreview_strategy.
@@ -344,14 +346,24 @@ class VectorizedShowdownEnv(gym.Env):
         self._cycle_prev_eval[i] = None
         eval_team = self.player_team_set
         opp_team = self.opponent_team_set
+        game_index = int(self._lane_game_counts[i])
+        def seeded_player_spec(name, team, stream):
+            # Key every team draw by model identity, lane, and game number.
+            # This makes the 250 p1 and 250 p2 runs use identical paired teams
+            # even when asynchronous lanes finish in a different order.
+            if self._base_seed is not None and hasattr(team, "seed"):
+                team.seed(self._derived_seed(i, game_index, stream=stream))
+            return player_spec(name, team, self.battle_format)
+
         if self.eval_side == "p1":
-            p1_team, p2_team = eval_team, opp_team
+            p1_spec, p1_file = seeded_player_spec(f"p1-{i}", eval_team, stream=1)
+            p2_spec, p2_file = seeded_player_spec(f"p2-{i}", opp_team, stream=2)
         else:
-            p1_team, p2_team = opp_team, eval_team
-        p1_spec, p1_file = player_spec(f"p1-{i}", p1_team, self.battle_format)
-        p2_spec, p2_file = player_spec(f"p2-{i}", p2_team, self.battle_format)
+            p1_spec, p1_file = seeded_player_spec(f"p1-{i}", opp_team, stream=2)
+            p2_spec, p2_file = seeded_player_spec(f"p2-{i}", eval_team, stream=1)
         self._team_files[i] = p1_file if self.eval_side == "p1" else p2_file
-        seed = self._random_seed()
+        seed = self._random_seed(i, game_index)
+        self._lane_game_counts[i] += 1
         self.proc.start_battle(i, self.battle_format, p1=p1_spec, p2=p2_spec, seed=seed)
 
     def _init_lane_trajectory(self, i: int) -> None:
@@ -359,9 +371,24 @@ class VectorizedShowdownEnv(gym.Env):
         self._traj_states[i] = [self.lanes[i].universal_state(self.eval_side)]
         self._traj_actions[i] = []
 
-    def _random_seed(self):
+    def _derived_seed(self, lane: int, game_index: int, stream: int) -> int:
+        """Stable per-game seed independent of asynchronous completion order."""
+        base = int(self._base_seed or 0) & ((1 << 64) - 1)
+        return (
+            base
+            ^ ((int(lane) + 1) * 0x9E3779B185EBCA87)
+            ^ ((int(game_index) + 1) * 0xC2B2AE3D27D4EB4F)
+            ^ (int(stream) * 0x165667B19E3779F9)
+        ) & ((1 << 64) - 1)
+
+    def _random_seed(self, lane: int, game_index: int):
         # Showdown PRNG seed: four 16-bit ints (sodium seed also accepted as str).
-        return [self._rng.randint(0, 0xFFFF) for _ in range(4)]
+        rng = (
+            random.Random(self._derived_seed(lane, game_index, stream=3))
+            if self._base_seed is not None
+            else self._rng
+        )
+        return [rng.randint(0, 0xFFFF) for _ in range(4)]
 
     # ----- obs / legality --------------------------------------------------
 
@@ -758,10 +785,19 @@ class VectorizedShowdownEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         if seed is not None:
             self._rng.seed(seed)
+            self._base_seed = seed
+            self._lane_game_counts[:] = 0
             np.random.seed(seed)
         options = options or {}
         self._configure_player_team_for_reset()
         self._configure_opponent_for_reset(options.get("opponent"))
+        # Seed custom team builders too. TeamSet is additionally re-seeded by
+        # lane/game identity in _start_lane for exact side-reversed pairing.
+        if seed is not None:
+            if hasattr(self.player_team_set, "seed"):
+                self.player_team_set.seed(seed + 1)
+            if hasattr(self.opponent_team_set, "seed"):
+                self.opponent_team_set.seed(seed + 2)
         self.opponent.reset_all()
         for i in range(self.batched_envs):
             self._start_lane(i)
@@ -872,8 +908,25 @@ class VectorizedShowdownEnv(gym.Env):
                     self._traj_states[i].append(new_eval)
                 hit_limit = self._lane_steps[i] >= self.turn_limit
                 if lane.ended or hit_limit:
-                    terminated[i] = bool(lane.ended) or hit_limit
+                    terminated[i] = bool(lane.ended)
                     truncated[i] = hit_limit and not lane.ended
+                    # Cross-check two independent terminal representations:
+                    # the host's explicit physical winner name and each POV
+                    # parser's battle_won flag. A side-label inversion here
+                    # would silently turn every tournament result upside down.
+                    if lane.ended and lane.winner is not None:
+                        expected_eval_win = lane.winner == f"{self.eval_side}-{i}"
+                        opponent_terminal = lane.universal_state(self.opp_side)
+                        if (
+                            bool(new_eval.battle_won) != expected_eval_win
+                            or bool(opponent_terminal.battle_won) == expected_eval_win
+                        ):
+                            raise RuntimeError(
+                                f"terminal POV mismatch lane={i}: "
+                                f"winner={lane.winner!r}, eval_side={self.eval_side}, "
+                                f"eval_won={new_eval.battle_won}, "
+                                f"opponent_won={opponent_terminal.battle_won}"
+                            )
                     infos[i]["won"] = bool(new_eval.battle_won)
                     # The native tournament must distinguish a draw (including
                     # a turn-limit truncation) from a loss. The old 'won' flag

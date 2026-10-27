@@ -45,6 +45,7 @@ def get_candidate_model(model_name: str, checkpoint: int):
         get_pretrained_model,
     )
 
+    model_gin = portable_model_config("grouped_v2_medium_cuda.gin")
     if model_name == "TaurosV1":
         # LocalFinetunedModel instantiates TaurosV1() to obtain observation
         # and actor metadata; ensure that base constructor sees this checkout.
@@ -61,7 +62,7 @@ def get_candidate_model(model_name: str, checkpoint: int):
             ),
             model_name="mediumg1online",
             default_checkpoint=checkpoint,
-            model_gin_config="grouped_v2_medium_cuda.gin",
+            model_gin_config=model_gin,
             train_gin_config="stage1_b1_imitation.gin",
         )
     if model_name != "Stage1B1":
@@ -73,9 +74,27 @@ def get_candidate_model(model_name: str, checkpoint: int):
         ),
         model_name=os.environ.get("B1_RUN_NAME", "stage1_b1"),
         default_checkpoint=checkpoint,
-        model_gin_config="grouped_v2_medium_cuda.gin",
+        model_gin_config=model_gin,
         train_gin_config="stage1_b1_imitation.gin",
     )
+
+
+def portable_model_config(config_name: str) -> str:
+    """Use the parameter-free PyTorch attention fallback when FA2 is absent."""
+    from amago.nets import transformer
+
+    if transformer.flash_attn is not None:
+        return config_name
+    portable = {
+        "grouped_v2_medium_cuda.gin": "grouped_v2_medium_portable.gin",
+        "grouped_v2_50m.gin": "grouped_v2_50m_portable.gin",
+    }
+    try:
+        return portable[config_name]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"No portable attention config is defined for {config_name}"
+        ) from exc
 
 
 def finish_score(done, truncated, info, lane: int) -> float:
@@ -89,6 +108,21 @@ def finish_score(done, truncated, info, lane: int) -> float:
     if won is None or won[lane] is None:
         raise RuntimeError("Native engine did not report a completed battle outcome")
     return 1.0 if won[lane] else 0.0
+
+
+def finish_outcome(done, truncated, info, lane: int) -> str:
+    """Return an auditable terminal category instead of conflating all draws."""
+    if not done:
+        raise ValueError("Cannot classify a running battle")
+    if truncated[lane]:
+        return "timeout"
+    draw = info.get("draw", [False] * len(truncated))[lane]
+    if draw:
+        return "draw"
+    won = info.get("won")
+    if won is None or won[lane] is None:
+        raise RuntimeError("Native engine did not report a completed battle outcome")
+    return "win" if won[lane] else "loss"
 
 
 def validate_native_inputs(env, obs, action_dim: int) -> None:
@@ -149,18 +183,52 @@ def run(args):
     lanes = min(args.lanes, args.battles)
     candidate_model = get_candidate_model(args.model, args.checkpoint)
     opponent_model = get_pretrained_model("TaurosV0")
-    print(f"[native] Loading {args.model} epoch {args.checkpoint}", flush=True)
+    portable_opponent_config = portable_model_config(opponent_model.model_gin_config)
+    if portable_opponent_config != opponent_model.model_gin_config:
+        opponent_model.model_gin_config = portable_opponent_config
+        opponent_model.model_gin_config_path = str(
+            Path(opponent_model.model_gin_config_path).with_name(
+                portable_opponent_config
+            )
+        )
+        print(
+            "[native] FlashAttention unavailable; using checkpoint-compatible "
+            "portable sliding-window attention",
+            flush=True,
+        )
+    checkpoint_label = args.checkpoint_path or f"epoch {args.checkpoint}"
+    print(f"[native] Loading {args.model} {checkpoint_label}", flush=True)
+    # AMAGO's temperature rescales logits before constructing the action
+    # distribution.  Temperature zero would divide by zero, so represent the
+    # requested zero-temperature limit exactly by disabling sampling and using
+    # argmax from the unscaled logits.
+    sample_actions = args.temperature > 0.0
+    distribution_temperature = args.temperature if sample_actions else 1.0
     candidate_exp = candidate_model.initialize_agent(
-        checkpoint=args.checkpoint, action_temperature=1.0, log=False
+        checkpoint=(0 if args.checkpoint_path else args.checkpoint),
+        action_temperature=distribution_temperature,
+        log=False,
     )
+    if args.checkpoint_path:
+        checkpoint_path = Path(args.checkpoint_path).expanduser().resolve()
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and "policy" in state:
+            state = state["policy"]
+        candidate_model._validate_checkpoint(
+            state, candidate_exp.policy.state_dict()
+        )
+        candidate_exp.policy.load_state_dict(state, strict=True)
+        candidate_exp.policy.on_checkpoint_loaded(is_resume=False)
     print("[native] Loading TaurosV0 epoch 62", flush=True)
     opponent_exp = opponent_model.initialize_agent(
-        checkpoint=62, action_temperature=1.0, log=False
+        checkpoint=62,
+        action_temperature=distribution_temperature,
+        log=False,
     )
     candidate_policy = candidate_exp.policy.to(device).eval()
     opponent_policy = opponent_exp.policy.to(device).eval()
-    # Policy actions are sampled, not argmax. Seed PyTorch after both model
-    # loads so the same test configuration has reproducible sampling streams.
+    # Seed after both model loads so sampled runs are reproducible. Argmax runs
+    # remain deterministic while using the same simulator/team seed handling.
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -169,14 +237,14 @@ def run(args):
         device=device,
         num_lanes=lanes,
         action_dim=candidate_model.action_space.gym_space.n,
-        sample=True,
+        sample=sample_actions,
     )
     opponent = AmagoBatchedOpponent(
         policy=opponent_policy,
         device=device,
         num_lanes=lanes,
         action_dim=opponent_model.action_space.gym_space.n,
-        sample=True,
+        sample=sample_actions,
     )
     env = VectorizedShowdownEnv(
         player_team_set=get_metamon_teams("gen1ou", args.candidate_team),
@@ -200,8 +268,20 @@ def run(args):
     quotas = np.full(lanes, args.battles // lanes, dtype=np.int64)
     quotas[: args.battles % lanes] += 1
     counts = np.zeros(lanes, dtype=np.int64)
-    scores = []
+    outcomes = []
     steps = 0
+    game_log = None
+    if args.game_log:
+        game_log_path = Path(args.game_log).expanduser().resolve()
+        game_log_path.parent.mkdir(parents=True, exist_ok=True)
+        game_log = game_log_path.open("a", buffering=1)
+        game_log.write(
+            f"Starting native matchup: candidate={args.model}, "
+            f"candidate_side=p{args.side + 1}, games={args.battles}, "
+            f"seed={args.seed}, action_mode="
+            f"{'sample' if sample_actions else 'argmax'}, "
+            f"temperature={args.temperature:g}\n"
+        )
     try:
         obs, _ = env.reset(seed=args.seed)
         while np.any(counts < quotas):
@@ -209,7 +289,7 @@ def run(args):
             if steps > args.max_steps:
                 raise RuntimeError(
                     f"Native matchup exceeded {args.max_steps} vector steps; "
-                    f"finished {len(scores)} of {args.battles} games"
+                    f"finished {len(outcomes)} of {args.battles} games"
                 )
             validate_native_inputs(env, obs, candidate_model.action_space.gym_space.n)
             active = np.ones(lanes, dtype=bool)
@@ -224,32 +304,49 @@ def run(args):
             for i in np.flatnonzero(done):
                 if counts[i] >= quotas[i]:
                     continue
-                scores.append(finish_score(True, truncated, info, int(i)))
+                outcome = finish_outcome(True, truncated, info, int(i))
+                outcomes.append(outcome)
                 counts[i] += 1
+                game_line = (
+                    f"Game {len(outcomes)}/{args.battles}: "
+                    f"candidate_side=p{args.side + 1}, lane={int(i)}, "
+                    f"lane_game={int(counts[i])}, result={outcome}"
+                )
+                print(f"[native-game] {game_line}", flush=True)
+                if game_log is not None:
+                    game_log.write(game_line + "\n")
             candidate.reset_lanes(done)
             if (
-                len(scores)
-                and (len(scores) % 10 == 0 or len(scores) == args.battles)
-                and getattr(run, "_last_printed", None) != len(scores)
+                len(outcomes)
+                and (len(outcomes) % 10 == 0 or len(outcomes) == args.battles)
+                and getattr(run, "_last_printed", None) != len(outcomes)
             ):
+                wins_so_far = outcomes.count("win")
+                half_so_far = outcomes.count("draw") + outcomes.count("timeout")
                 print(
-                    f"[native] {len(scores)}/{args.battles} battles finished, "
-                    f"score={sum(scores) / len(scores):.3f}",
+                    f"[native] {len(outcomes)}/{args.battles} battles finished, "
+                    f"score={(wins_so_far + 0.5 * half_so_far) / len(outcomes):.3f}",
                     flush=True,
                 )
-                run._last_printed = len(scores)
+                run._last_printed = len(outcomes)
     finally:
         env.close()
+        if game_log is not None:
+            game_log.close()
 
-    wins = scores.count(1.0)
-    draws = scores.count(0.5)
-    losses = scores.count(0.0)
-    assert wins + draws + losses == args.battles
+    wins = outcomes.count("win")
+    losses = outcomes.count("loss")
+    natural_draws = outcomes.count("draw")
+    timeouts = outcomes.count("timeout")
+    draws = natural_draws + timeouts
+    assert wins + losses + draws == args.battles
     output = {
         "battles": args.battles,
         "candidate_wins": wins,
         "opponent_wins": losses,
         "draws": draws,
+        "natural_draws": natural_draws,
+        "timeouts": timeouts,
         "candidate_score": (wins + 0.5 * draws) / args.battles,
         "engine": "zig-pkmn",
         "side": args.side,
@@ -260,7 +357,12 @@ def run(args):
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(output, indent=2) + "\n")
     temporary.replace(output_path)
-    print(f"[native] Completed: {json.dumps(output)}", flush=True)
+    print(
+        f"[native] Completed {args.battles} battles: wins={wins}, "
+        f"losses={losses}, natural_draws={natural_draws}, "
+        f"timeouts={timeouts}, score={output['candidate_score']:.4f}",
+        flush=True,
+    )
 
 
 def main():
@@ -268,7 +370,9 @@ def main():
     p.add_argument(
         "--model", choices=("Stage1B1", "TaurosV1"), required=True
     )
-    p.add_argument("--checkpoint", type=int, required=True)
+    checkpoint = p.add_mutually_exclusive_group(required=True)
+    checkpoint.add_argument("--checkpoint", type=int)
+    checkpoint.add_argument("--checkpoint-path")
     p.add_argument("--candidate-team", required=True)
     p.add_argument("--opponent-team", required=True)
     p.add_argument("--side", type=int, choices=(0, 1), required=True)
@@ -276,12 +380,27 @@ def main():
     p.add_argument("--lanes", type=int, default=8)
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--seed", type=int, default=2026)
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Action temperature; zero selects deterministic argmax for both policies.",
+    )
     p.add_argument("--turn-limit", type=int, default=200)
     p.add_argument("--max-steps", type=int, default=100000)
     p.add_argument("--output", required=True)
+    p.add_argument("--game-log")
     args = p.parse_args()
     if args.battles < 1 or args.lanes < 1 or args.workers < 1:
         p.error("battles, lanes and workers must be positive")
+    if args.temperature < 0:
+        p.error("temperature must be non-negative")
+    if args.checkpoint_path and not Path(args.checkpoint_path).expanduser().is_file():
+        p.error(f"checkpoint path does not exist: {args.checkpoint_path}")
+    # A path load still needs an architecture descriptor; zero means construct
+    # the model without fetching/loading an epoch checkpoint.
+    if args.checkpoint is None:
+        args.checkpoint = 0
     run(args)
 
 

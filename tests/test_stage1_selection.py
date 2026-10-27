@@ -115,6 +115,22 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(
             native.finish_score(True, [True], {"won": [False], "draw": [True]}, 0), 0.5
         )
+        self.assertEqual(
+            native.finish_outcome(True, [False], {"won": [True], "draw": [False]}, 0),
+            "win",
+        )
+        self.assertEqual(
+            native.finish_outcome(True, [False], {"won": [False], "draw": [False]}, 0),
+            "loss",
+        )
+        self.assertEqual(
+            native.finish_outcome(True, [False], {"won": [False], "draw": [True]}, 0),
+            "draw",
+        )
+        self.assertEqual(
+            native.finish_outcome(True, [True], {"won": [False], "draw": [True]}, 0),
+            "timeout",
+        )
         with self.assertRaises(ValueError):
             native.finish_score(False, [False], {"won": [True]}, 0)
 
