@@ -11,8 +11,8 @@ from pathlib import Path
 
 
 DEFAULT_PLAYERS = (
+    "Tauros-v1",
     "Tauros-v2",
-    "Tauros-v3",
     "SmallG1Online-v2",
     "SmallG1Online-v3",
 )
