@@ -29,8 +29,85 @@ def _load_state(path: Path) -> dict[str, torch.Tensor]:
     return state
 
 
+def _normalize(vector: torch.Tensor, *, key: str) -> torch.Tensor:
+    norm = torch.linalg.vector_norm(vector)
+    if not torch.isfinite(norm) or norm <= 1e-12:
+        raise ValueError(f"cannot normalize SigmaReparam buffer {key!r}")
+    return vector / norm
+
+
+def _recalibrate_sigma_reparam(
+    state: dict[str, torch.Tensor],
+    power_iterations: int,
+    initial_state: dict[str, torch.Tensor] | None = None,
+) -> int:
+    """Make SigmaReparam spectral buffers consistent with averaged weights.
+
+    SigmaReparam stores unit left/right power-iteration vectors as floating-point
+    buffers named ``u`` and ``v``.  Numerically averaging those buffers is invalid:
+    their average is generally neither unit length nor a singular-vector estimate
+    for the averaged weight.  Recompute them here before publishing the soup.
+    """
+    if power_iterations < 1:
+        raise ValueError("SigmaReparam power iterations must be positive")
+
+    prefixes = sorted(key[:-2] for key in state if key.endswith(".u"))
+    recalibrated = 0
+    for prefix in prefixes:
+        u_key = f"{prefix}.u"
+        v_key = f"{prefix}.v"
+        weight_key = f"{prefix}.weight"
+        if weight_key not in state:
+            # A non-SigmaReparam module may legitimately own a buffer named ``u``.
+            continue
+        if v_key not in state:
+            raise ValueError(f"SigmaReparam buffer {u_key!r} has no matching {v_key!r}")
+
+        weight = state[weight_key]
+        u_reference = state[u_key]
+        v_reference = state[v_key]
+        if weight.ndim != 2 or tuple(u_reference.shape) != (weight.shape[0],) or tuple(
+            v_reference.shape
+        ) != (weight.shape[1],):
+            raise ValueError(
+                f"invalid SigmaReparam shapes for {prefix!r}: "
+                f"weight={tuple(weight.shape)} u={tuple(u_reference.shape)} "
+                f"v={tuple(v_reference.shape)}"
+            )
+
+        matrix = weight.float()
+        # Start from a real checkpoint buffer, never from an averaged spectral
+        # buffer. Every iteration below then targets the averaged weight.
+        v = (
+            initial_state[v_key].float()
+            if initial_state is not None and v_key in initial_state
+            else v_reference.float()
+        )
+        if not torch.isfinite(v).all() or torch.linalg.vector_norm(v) <= 1e-12:
+            v = torch.ones(matrix.shape[1], dtype=torch.float32)
+        v = _normalize(v, key=v_key)
+        for _ in range(power_iterations):
+            u = _normalize(matrix @ v, key=u_key)
+            v = _normalize(matrix.T @ u, key=v_key)
+        u = _normalize(matrix @ v, key=u_key)
+
+        sigma = torch.dot(u, matrix @ v)
+        if not torch.isfinite(sigma) or sigma <= 0:
+            raise ValueError(
+                f"invalid SigmaReparam spectral estimate for {prefix!r}: {sigma.item()}"
+            )
+        state[u_key] = u.to(u_reference.dtype)
+        state[v_key] = v.to(v_reference.dtype)
+        recalibrated += 1
+    return recalibrated
+
+
 def average_checkpoints(
-    checkpoints: list[Path], weights: list[float], output: Path
+    checkpoints: list[Path],
+    weights: list[float],
+    output: Path,
+    *,
+    sigma_power_iterations: int = 32,
 ) -> Path:
     if len(checkpoints) < 2:
         raise ValueError("at least two checkpoints are required")
@@ -87,6 +164,12 @@ def average_checkpoints(
                 raise ValueError(f"averaged tensor {key!r} contains non-finite values")
             output_state[key] = tensor.to(reference_tensor.dtype)
 
+    sigma_layers = _recalibrate_sigma_reparam(
+        output_state,
+        power_iterations=sigma_power_iterations,
+        initial_state=reference,
+    )
+
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
     torch.save(output_state, temporary)
@@ -97,6 +180,8 @@ def average_checkpoints(
         "Policy checkpoint weight average",
         f"Output: {output}",
         f"Output SHA-256: {_sha256(output)}",
+        f"SigmaReparam layers recalibrated: {sigma_layers}",
+        f"SigmaReparam power iterations: {sigma_power_iterations}",
         "Sources:",
     ]
     for path, weight in zip(checkpoints, normalized):
@@ -110,6 +195,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, action="append", required=True)
     parser.add_argument("--weight", type=float, action="append")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--sigma-power-iterations", type=int, default=32)
     args = parser.parse_args()
 
     checkpoints = [path.expanduser().resolve() for path in args.checkpoint]
@@ -118,7 +204,12 @@ def main() -> None:
         parser.error(f"missing checkpoint: {missing[0]}")
     weights = args.weight if args.weight is not None else [1.0] * len(checkpoints)
     try:
-        output = average_checkpoints(checkpoints, weights, args.output.expanduser().resolve())
+        output = average_checkpoints(
+            checkpoints,
+            weights,
+            args.output.expanduser().resolve(),
+            sigma_power_iterations=args.sigma_power_iterations,
+        )
     except ValueError as exc:
         parser.error(str(exc))
     print(f"Wrote averaged checkpoint: {output}")

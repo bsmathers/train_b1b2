@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -40,6 +42,31 @@ def _numbered_checkpoints(policy_dir: Path, end_epoch: int | None) -> list[tuple
     return sorted(found)
 
 
+def _same_policy_state(first: Path, second: Path) -> bool:
+    first_state = torch.load(first, map_location="cpu", weights_only=True)
+    second_state = torch.load(second, map_location="cpu", weights_only=True)
+    if list(first_state) != list(second_state):
+        return False
+    return all(
+        first_state[key].shape == second_state[key].shape
+        and first_state[key].dtype == second_state[key].dtype
+        and torch.equal(first_state[key], second_state[key])
+        for key in first_state
+    )
+
+
+def _remove_restored_best_alias(
+    numbered: list[tuple[int, Path]], published_best: Path
+) -> tuple[list[tuple[int, Path]], int | None]:
+    """Drop the synthetic terminal epoch written after restoring validation-best."""
+    if not numbered:
+        return numbered, None
+    terminal_epoch, terminal_path = numbered[-1]
+    if _same_policy_state(terminal_path, published_best):
+        return numbered[:-1], terminal_epoch
+    return numbered, None
+
+
 def _read_summary(path: Path) -> dict[str, float | int]:
     values: dict[str, float | int] = {}
     labels = {
@@ -64,7 +91,8 @@ def main() -> None:
     parser.add_argument("--run-name", default="stage1_b1_epoch51_selected_actor")
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--windows", type=int, nargs="+", default=[2, 4, 8])
+    parser.add_argument("--windows", type=int, nargs="+", default=[2, 4, 8, 16])
+    parser.add_argument("--sigma-power-iterations", type=int, default=32)
     parser.add_argument("--end-epoch", type=int)
     parser.add_argument("--battles", type=int, default=500)
     parser.add_argument("--lanes", type=int, default=32)
@@ -85,9 +113,20 @@ def main() -> None:
     published_best = policy_dir / "policy_actor_bc_final.pt"
     if not published_best.is_file():
         parser.error(f"published validation-best checkpoint is missing: {published_best}")
-    numbered = _numbered_checkpoints(policy_dir, args.end_epoch)
+    numbered = _numbered_checkpoints(policy_dir, None)
     if not numbered:
         parser.error(f"no numbered checkpoints found in {policy_dir}")
+    numbered, removed_alias = _remove_restored_best_alias(numbered, published_best)
+    if removed_alias is not None:
+        print(
+            f"Excluded policy_epoch_{removed_alias}.pt: it is the restored validation-best "
+            "alias, not a chronological training checkpoint",
+            flush=True,
+        )
+    if args.end_epoch is not None:
+        numbered = [(epoch, path) for epoch, path in numbered if epoch <= args.end_epoch]
+    if not numbered:
+        parser.error("no chronological numbered checkpoints remain after filtering")
 
     windows = sorted(set(args.windows))
     skipped_windows = [window for window in windows if window > len(numbered)]
@@ -109,7 +148,10 @@ def main() -> None:
         name = f"uniform_last_{window}_epochs_{epochs[0]}_{epochs[-1]}"
         destination = averages_dir / f"{name}.pt"
         average_checkpoints(
-            [path for _, path in selected], [1.0] * window, destination
+            [path for _, path in selected],
+            [1.0] * window,
+            destination,
+            sigma_power_iterations=args.sigma_power_iterations,
         )
         candidates.append((name, destination, epochs))
 
