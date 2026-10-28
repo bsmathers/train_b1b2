@@ -1,0 +1,18 @@
+import metamon.rl.stage1_b1
+
+# Conservative Monte Carlo advantage-weighted cloning from a completed actor.
+# The same source checkpoint supplies the immutable actor and W/L/D baselines;
+# no Epoch475 outputs or weights participate in the refinement objective.
+MetamonAMAGOExperiment.agent_type = @stage1_b1.Stage1B1Agent
+MetamonAMAGOExperiment.l2_coeff = 0.001
+MetamonAMAGOExperiment.learning_rate = 1e-5
+MetamonAMAGOExperiment.grad_clip = 1.0
+MetamonAMAGOExperiment.lr_warmup_steps = 100
+
+stage1_b1.Stage1B1Agent.actor_bc_coef = 0.55
+stage1_b1.Stage1B1Agent.actor_policy_kl_coef = 0.25
+stage1_b1.Stage1B1Agent.actor_value_kl_coef = 0.20
+stage1_b1.Stage1B1Agent.actor_weighting = "monte_carlo_awr"
+stage1_b1.Stage1B1Agent.awr_temperature = 0.5
+stage1_b1.Stage1B1Agent.awr_min_weight = 0.25
+stage1_b1.Stage1B1Agent.awr_max_weight = 4.0

@@ -6,9 +6,10 @@ The value pipeline has two stages:
      policy KL and L2-SP protection;
 
 Actor refinement is a separate run from the best stage-2 checkpoint. It uses
-ordinary behavior cloning on strong-model actions, plus functional anchors to
-the initially loaded policy and stage-2 value model. It deliberately does not use
-trajectory outcomes as per-action advantage estimates.
+behavior cloning on strong-model actions, plus functional anchors to the
+initially loaded policy and stage-2 value model. An optional Monte Carlo AWR
+mode weights each logged action by the terminal W/L/D residual against the
+frozen value baseline.
 """
 
 from __future__ import annotations
@@ -49,6 +50,30 @@ def _module_grad_norm(module: nn.Module) -> float:
     return math.sqrt(total)
 
 
+def _monte_carlo_awr_weights(
+    outcome: torch.Tensor,
+    baseline: torch.Tensor,
+    temperature: float,
+    minimum: float,
+    maximum: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return clipped exp((terminal outcome - V(s)) / temperature) weights."""
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("AWR temperature must be finite and positive")
+    if (
+        not math.isfinite(minimum)
+        or not math.isfinite(maximum)
+        or minimum <= 0
+        or maximum < minimum
+    ):
+        raise ValueError("AWR weight bounds must be finite, positive, and ordered")
+    advantage = (outcome.float() - baseline.float()).detach()
+    log_weight = (advantage / temperature).clamp(
+        min=math.log(minimum), max=math.log(maximum)
+    )
+    return log_weight.exp(), advantage
+
+
 @gin.configurable
 class Stage1B1Agent(MultiTaskAgent):
     """Anchored actor/backbone with a categorical W/L/D head and no Q critics."""
@@ -67,6 +92,10 @@ class Stage1B1Agent(MultiTaskAgent):
         actor_bc_coef: float = 0.55,
         actor_policy_kl_coef: float = 0.25,
         actor_value_kl_coef: float = 0.20,
+        actor_weighting: str = "uniform",
+        awr_temperature: float = 0.5,
+        awr_min_weight: float = 0.25,
+        awr_max_weight: float = 4.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -88,6 +117,10 @@ class Stage1B1Agent(MultiTaskAgent):
         self.actor_bc_coef = float(actor_bc_coef)
         self.actor_policy_kl_coef = float(actor_policy_kl_coef)
         self.actor_value_kl_coef = float(actor_value_kl_coef)
+        self.actor_weighting = str(actor_weighting)
+        self.awr_temperature = float(awr_temperature)
+        self.awr_min_weight = float(awr_min_weight)
+        self.awr_max_weight = float(awr_max_weight)
         actor_coefficients = (
             self.actor_bc_coef,
             self.actor_policy_kl_coef,
@@ -97,6 +130,17 @@ class Stage1B1Agent(MultiTaskAgent):
             raise ValueError("actor refinement coefficients must be finite and non-negative")
         if sum(actor_coefficients) <= 0:
             raise ValueError("at least one actor refinement coefficient must be positive")
+        if self.actor_weighting not in ("uniform", "monte_carlo_awr"):
+            raise ValueError(
+                "actor_weighting must be 'uniform' or 'monte_carlo_awr'"
+            )
+        _monte_carlo_awr_weights(
+            torch.zeros(()),
+            torch.zeros(()),
+            self.awr_temperature,
+            self.awr_min_weight,
+            self.awr_max_weight,
+        )
         self._b1_phase = self.PHASE_VALUE_HEAD
         self._anchor_teacher = None
         self._phase2_reference = None
@@ -317,6 +361,9 @@ class Stage1B1Agent(MultiTaskAgent):
         expected_value = value_probs[..., 2] - value_probs[..., 0]
 
         policy_kl = value_kl = actor_loss = torch.zeros((), device=s.device)
+        unweighted_actor_loss = torch.zeros((), device=s.device)
+        awr_weight_mean = awr_ess_fraction = torch.ones((), device=s.device)
+        awr_advantage_mean = torch.zeros((), device=s.device)
         l2sp = torch.zeros((), device=s.device)
         loss = value_ce
 
@@ -345,6 +392,7 @@ class Stage1B1Agent(MultiTaskAgent):
 
         if self._b1_phase == self.PHASE_ACTOR:
             ref_value_probs = self._phase2_value_distribution(batch)
+            ref_expected = ref_value_probs[..., 2] - ref_value_probs[..., 0]
             value_kl_step = (
                 ref_value_probs
                 * (
@@ -360,7 +408,28 @@ class Stage1B1Agent(MultiTaskAgent):
             valid_actions = valid_states[:, :T] & (
                 ~batch.obs["missing_action_mask"][:, :T, 0].bool()
             )
-            actor_loss = _trajectory_mean(-chosen_lp, valid_actions)
+            unweighted_actor_loss = _trajectory_mean(-chosen_lp, valid_actions)
+            if self.actor_weighting == "monte_carlo_awr":
+                outcome = targets[:, :T].float() - 1.0
+                weights, advantage = _monte_carlo_awr_weights(
+                    outcome,
+                    ref_expected[:, :T],
+                    self.awr_temperature,
+                    self.awr_min_weight,
+                    self.awr_max_weight,
+                )
+                awr_weight_mean = _trajectory_mean(weights, valid_actions)
+                actor_loss = _trajectory_mean(
+                    -weights * chosen_lp, valid_actions
+                ) / awr_weight_mean.detach().clamp_min(1e-8)
+                mean_weight_squared = _trajectory_mean(weights.square(), valid_actions)
+                awr_ess_fraction = (
+                    awr_weight_mean.square()
+                    / mean_weight_squared.clamp_min(1e-8)
+                )
+                awr_advantage_mean = _trajectory_mean(advantage, valid_actions)
+            else:
+                actor_loss = unweighted_actor_loss
             loss = (
                 self.actor_bc_coef * actor_loss
                 + self.actor_policy_kl_coef * policy_kl
@@ -373,7 +442,11 @@ class Stage1B1Agent(MultiTaskAgent):
                 "B1/WLD CE": value_ce.detach(),
                 "B1/Policy KL": policy_kl.detach(),
                 "B1/Value KL": value_kl.detach(),
-                "B1/Actor BC Loss": actor_loss.detach(),
+                "B1/Actor BC Loss": unweighted_actor_loss.detach(),
+                "B1/Actor Objective Loss": actor_loss.detach(),
+                "B1/AWR Weight Mean": awr_weight_mean.detach(),
+                "B1/AWR ESS Fraction": awr_ess_fraction.detach(),
+                "B1/AWR Advantage Mean": awr_advantage_mean.detach(),
                 "B1/L2-SP": l2sp.detach(),
                 "B1/Expected Value": _trajectory_mean(expected_value, valid_states).detach(),
             }
@@ -711,7 +784,7 @@ def run_actor_refinement(
     patience: int,
     min_delta: float,
 ):
-    """Refine a value-fitted model with plain BC and fixed anchors.
+    """Refine a value-fitted model with anchored BC or Monte Carlo AWR.
 
     The experiment first loads the requested anchor checkpoint, causing
     ``on_checkpoint_loaded`` to capture its immutable policy teacher. Loading
@@ -749,15 +822,26 @@ def run_actor_refinement(
 
     policy_dir = Path(experiment.ckpt_dir) / "policy_weights"
     training_dir = Path(experiment.ckpt_dir) / "training_states"
-    best_path = policy_dir / "policy_actor_bc_best.pt"
-    best_training_path = training_dir / "training_actor_bc_best.pt"
+    actor_mode = (
+        "actor_awr"
+        if policy.actor_weighting == "monte_carlo_awr"
+        else "actor_bc"
+    )
+    validation_key = f"b1-validation-{actor_mode.replace('_', '-')}"
+    validation_label = (
+        "B1AWRValidation"
+        if actor_mode == "actor_awr"
+        else "B1ActorValidation"
+    )
+    best_path = policy_dir / f"policy_{actor_mode}_best.pt"
+    best_training_path = training_dir / f"training_{actor_mode}_best.pt"
     best_metric, metrics = _validate(
         experiment, loader, policy.PHASE_ACTOR, seed=validation_seed
     )
-    experiment.log(metrics, key="b1-validation-actor-bc")
+    experiment.log(metrics, key=validation_key)
     _save_best_state(experiment, policy, best_path, best_training_path)
     print(
-        "[B1ActorValidation] epoch=initial global_epoch=0 "
+        f"[{validation_label}] epoch=initial global_epoch=0 "
         f"metric={best_metric:.6f} best={best_metric:.6f}"
     )
 
@@ -773,9 +857,9 @@ def run_actor_refinement(
         metric, metrics = _validate(
             experiment, loader, policy.PHASE_ACTOR, seed=validation_seed
         )
-        experiment.log(metrics, key="b1-validation-actor-bc")
+        experiment.log(metrics, key=validation_key)
         print(
-            f"[B1ActorValidation] epoch={epoch} global_epoch={epoch} "
+            f"[{validation_label}] epoch={epoch} global_epoch={epoch} "
             f"metric={metric:.6f} best={best_metric:.6f}"
         )
         if metric < best_metric - min_delta:
@@ -787,7 +871,8 @@ def run_actor_refinement(
         completed_epochs = epoch + 1
         if patience > 0 and stale >= patience:
             print(
-                f"[B1ActorEarlyStop] epoch={epoch} best={best_metric:.6f} "
+                f"[{'B1AWREarlyStop' if actor_mode == 'actor_awr' else 'B1ActorEarlyStop'}] "
+                f"epoch={epoch} best={best_metric:.6f} "
                 f"patience={patience}"
             )
             break
@@ -796,12 +881,14 @@ def run_actor_refinement(
     _restore_best_state(experiment, policy, best_training_path)
     if experiment.accelerator.is_main_process:
         final_state = policy.state_dict()
-        _atomic_torch_save(final_state, policy_dir / "policy_actor_bc_final.pt")
+        final_path = policy_dir / f"policy_{actor_mode}_final.pt"
+        _atomic_torch_save(final_state, final_path)
         _atomic_torch_save(final_state, policy_dir / f"policy_epoch_{completed_epochs}.pt")
         _atomic_torch_save(final_state, Path(experiment.ckpt_dir) / "latest" / "policy.pt")
         print(
-            "[B1ActorFinal] published restored validation-best plain-BC actor as "
-            f"policy_actor_bc_final.pt, policy_epoch_{completed_epochs}.pt, "
+            f"[{'B1AWRFinal' if actor_mode == 'actor_awr' else 'B1ActorFinal'}] "
+            f"published restored validation-best {actor_mode} actor as "
+            f"{final_path.name}, policy_epoch_{completed_epochs}.pt, "
             "and latest/policy.pt"
         )
     experiment.accelerator.wait_for_everyone()

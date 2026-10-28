@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from metamon.rl.stage1_b1 import (
     Stage1B1Agent,
+    _monte_carlo_awr_weights,
     _restore_best_state,
     _save_best_state,
     _save_numbered_policy,
@@ -42,6 +43,19 @@ class Stage1B1StateTests(unittest.TestCase):
         self.assertTrue(all(p.requires_grad for p in agent.wld_value.parameters()))
         for module in (agent.tstep_encoder, agent.traj_encoder, agent.actor):
             self.assertTrue(all(not p.requires_grad for p in module.parameters()))
+
+    def test_monte_carlo_awr_weights_use_frozen_value_residual(self):
+        outcome = torch.tensor([1.0, 1.0, -1.0, -1.0])
+        baseline = torch.tensor([0.9, -0.5, -0.9, 0.5], requires_grad=True)
+        weights, advantage = _monte_carlo_awr_weights(
+            outcome, baseline, temperature=0.5, minimum=0.25, maximum=4.0
+        )
+        self.assertLess(float(weights[0]), float(weights[1]))
+        self.assertGreater(float(weights[2]), float(weights[3]))
+        self.assertGreaterEqual(float(weights.min()), 0.25)
+        self.assertLessEqual(float(weights.max()), 4.0)
+        self.assertFalse(weights.requires_grad)
+        self.assertFalse(advantage.requires_grad)
 
     def test_loaded_anchor_is_an_immutable_snapshot(self):
         agent = self._minimal_agent()
