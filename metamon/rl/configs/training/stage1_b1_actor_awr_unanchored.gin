@@ -1,0 +1,19 @@
+import metamon.rl.stage1_b1
+
+# Deliberately unanchored Monte Carlo AWR experiment. The frozen source value
+# model is used only to compute advantages. There is no actor-distribution KL
+# and no value-distribution KL constraining the live actor/backbone.
+MetamonAMAGOExperiment.agent_type = @stage1_b1.Stage1B1Agent
+MetamonAMAGOExperiment.l2_coeff = 0.001
+MetamonAMAGOExperiment.learning_rate = 3e-6
+MetamonAMAGOExperiment.grad_clip = 1.0
+MetamonAMAGOExperiment.lr_warmup_steps = 100
+
+stage1_b1.Stage1B1Agent.policy_kl_coef = 0.0
+stage1_b1.Stage1B1Agent.actor_bc_coef = 1.0
+stage1_b1.Stage1B1Agent.actor_policy_kl_coef = 0.0
+stage1_b1.Stage1B1Agent.actor_value_kl_coef = 0.0
+stage1_b1.Stage1B1Agent.actor_weighting = "monte_carlo_awr"
+stage1_b1.Stage1B1Agent.awr_temperature = 0.5
+stage1_b1.Stage1B1Agent.awr_min_weight = 0.25
+stage1_b1.Stage1B1Agent.awr_max_weight = 4.0

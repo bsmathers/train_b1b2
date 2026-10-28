@@ -142,6 +142,7 @@ class Stage1B1Agent(MultiTaskAgent):
             self.awr_max_weight,
         )
         self._b1_phase = self.PHASE_VALUE_HEAD
+        self._anchor_loaded = False
         self._anchor_teacher = None
         self._phase2_reference = None
         self._backbone_anchor = None
@@ -220,9 +221,16 @@ class Stage1B1Agent(MultiTaskAgent):
         # immutable functional anchor. Actor refinement may subsequently load a
         # value-refitted derivative, but its policy KL must continue to target
         # this exact checkpoint rather than an older architectural base model.
-        self._anchor_teacher = self._copy_modules(
-            self.tstep_encoder, self.traj_encoder, self.actor
-        )
+        self._anchor_loaded = True
+        # An unanchored actor run still needs the separately captured frozen
+        # value function for AWR advantages, but it never evaluates an actor
+        # teacher. Avoid retaining and running a second backbone in that case.
+        if self.policy_kl_coef > 0 or self.actor_policy_kl_coef > 0:
+            self._anchor_teacher = self._copy_modules(
+                self.tstep_encoder, self.traj_encoder, self.actor
+            )
+        else:
+            self._anchor_teacher = None
         self._capture_backbone_anchor()
 
     def _capture_backbone_anchor(self):
@@ -378,29 +386,41 @@ class Stage1B1Agent(MultiTaskAgent):
                 probs.clamp_min(1e-30).log(),
                 torch.full_like(probs, -70.0),
             )
-            teacher_probs = self._teacher_policy(batch)
-            teacher_log = torch.where(
-                teacher_probs > 0,
-                teacher_probs.clamp_min(1e-30).log(),
-                torch.full_like(teacher_probs, -70.0),
+            active_policy_kl_coef = (
+                self.policy_kl_coef
+                if self._b1_phase == self.PHASE_VALUE_BACKBONE
+                else self.actor_policy_kl_coef
             )
-            policy_kl_step = (teacher_probs * (teacher_log - log_probs)).sum(-1)
-            policy_kl = _trajectory_mean(policy_kl_step, valid_states)
+            if active_policy_kl_coef > 0:
+                teacher_probs = self._teacher_policy(batch)
+                teacher_log = torch.where(
+                    teacher_probs > 0,
+                    teacher_probs.clamp_min(1e-30).log(),
+                    torch.full_like(teacher_probs, -70.0),
+                )
+                policy_kl_step = (teacher_probs * (teacher_log - log_probs)).sum(-1)
+                policy_kl = _trajectory_mean(policy_kl_step, valid_states)
             if self._b1_phase == self.PHASE_VALUE_BACKBONE:
                 l2sp = self._l2sp()
                 loss = loss + self.policy_kl_coef * policy_kl + self.l2sp_coef * l2sp
 
         if self._b1_phase == self.PHASE_ACTOR:
-            ref_value_probs = self._phase2_value_distribution(batch)
-            ref_expected = ref_value_probs[..., 2] - ref_value_probs[..., 0]
-            value_kl_step = (
-                ref_value_probs
-                * (
-                    ref_value_probs.clamp_min(1e-30).log()
-                    - value_probs.clamp_min(1e-30).log()
-                )
-            ).sum(-1)
-            value_kl = _trajectory_mean(value_kl_step, valid_states)
+            needs_value_reference = (
+                self.actor_weighting == "monte_carlo_awr"
+                or self.actor_value_kl_coef > 0
+            )
+            if needs_value_reference:
+                ref_value_probs = self._phase2_value_distribution(batch)
+                ref_expected = ref_value_probs[..., 2] - ref_value_probs[..., 0]
+                if self.actor_value_kl_coef > 0:
+                    value_kl_step = (
+                        ref_value_probs
+                        * (
+                            ref_value_probs.clamp_min(1e-30).log()
+                            - value_probs.clamp_min(1e-30).log()
+                        )
+                    ).sum(-1)
+                    value_kl = _trajectory_mean(value_kl_step, valid_states)
 
             T = batch.actions.shape[1]
             chosen = batch.actions.argmax(-1)
@@ -692,7 +712,7 @@ def run_value_head_refit(
     policy = experiment.accelerator.unwrap_model(experiment.policy_aclr)
     if not isinstance(policy, Stage1B1Agent):
         raise TypeError("B1 value-head refit requires Stage1B1Agent")
-    if policy._anchor_teacher is None:
+    if not policy._anchor_loaded:
         raise RuntimeError("anchor checkpoint must be captured before value-head refit")
     policy.set_b1_phase(policy.PHASE_VALUE_HEAD)
 
@@ -800,7 +820,7 @@ def run_actor_refinement(
     policy = experiment.accelerator.unwrap_model(experiment.policy_aclr)
     if not isinstance(policy, Stage1B1Agent):
         raise TypeError("B1 actor refinement requires Stage1B1Agent")
-    if policy._anchor_teacher is None:
+    if not policy._anchor_loaded:
         raise RuntimeError("policy anchor must be captured before loading value model")
     policy.load_state_dict(_load_policy_state(phase2_path, experiment.DEVICE), strict=True)
     policy.capture_phase2_reference()

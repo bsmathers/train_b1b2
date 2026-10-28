@@ -32,9 +32,12 @@ class Stage1B1StateTests(unittest.TestCase):
         agent.actor = nn.Linear(2, 2)
         agent.wld_value = nn.Linear(2, 3)
         agent._b1_phase = Stage1B1Agent.PHASE_VALUE_HEAD
+        agent._anchor_loaded = False
         agent._anchor_teacher = None
         agent._phase2_reference = None
         agent._backbone_anchor = None
+        agent.policy_kl_coef = 1.0
+        agent.actor_policy_kl_coef = 0.25
         return agent
 
     def test_value_refit_freezes_everything_except_wld_head(self):
@@ -67,6 +70,14 @@ class Stage1B1StateTests(unittest.TestCase):
             agent.actor.weight.zero_()
         self.assertTrue(torch.equal(teacher_actor.weight, torch.full_like(teacher_actor.weight, 5.0)))
         self.assertTrue(all(not p.requires_grad for p in teacher_actor.parameters()))
+
+    def test_zero_policy_kl_does_not_retain_actor_teacher(self):
+        agent = self._minimal_agent()
+        agent.policy_kl_coef = 0.0
+        agent.actor_policy_kl_coef = 0.0
+        agent.on_checkpoint_loaded(is_resume=False)
+        self.assertTrue(agent._anchor_loaded)
+        self.assertIsNone(agent._anchor_teacher)
 
     def test_best_state_restores_policy_optimizer_and_scheduler(self):
         policy = nn.Linear(2, 1, bias=False)
