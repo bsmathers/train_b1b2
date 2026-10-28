@@ -14,6 +14,7 @@ Storage formats supported:
 import os
 import json
 import random
+import re
 import csv
 import copy
 from typing import Optional, Dict, Tuple, List, Any
@@ -346,16 +347,37 @@ class MetamonDataset(Dataset):
     ## Train / Test Split  ##
     ##########################
 
+    @staticmethod
+    def _split_group(filename: str) -> str:
+        """Return the underlying battle id shared by perspective trajectories."""
+        basename = os.path.basename(filename)
+        # Parsed replay names begin ``<showdown-battle-id>_<rating>_...``.
+        # Both player-perspective trajectories therefore share the first field.
+        # Files without that convention safely fall back to their full basename.
+        match = re.match(r"^([A-Za-z0-9]+-\d+)_", basename)
+        return match.group(1) if match else basename
+
     def _apply_split(self):
-        """Partition filenames into train/test via deterministic seeded shuffle."""
+        """Partition whole battles, never individual player perspectives."""
         if self.split is None:
             return
-        fnames = sorted(self.filenames)
-        random.Random(self.split_seed).shuffle(fnames)
-        cutoff = int(len(fnames) * (1 - self.test_fraction))
-        self.filenames = fnames[:cutoff] if self.split == "train" else fnames[cutoff:]
+        grouped = defaultdict(list)
+        for filename in sorted(self.filenames):
+            grouped[self._split_group(filename)].append(filename)
+        group_names = sorted(grouped)
+        random.Random(self.split_seed).shuffle(group_names)
+        cutoff = int(len(group_names) * (1 - self.test_fraction))
+        selected_groups = (
+            group_names[:cutoff] if self.split == "train" else group_names[cutoff:]
+        )
+        self.filenames = [
+            filename for group in selected_groups for filename in grouped[group]
+        ]
         if self.verbose:
-            print(f"  Split '{self.split}': {len(self.filenames)} battles")
+            print(
+                f"  Split '{self.split}': {len(self.filenames)} trajectories from "
+                f"{len(selected_groups)} battles"
+            )
 
     ###################
     ## File Indexing ##

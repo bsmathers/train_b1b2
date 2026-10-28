@@ -36,6 +36,13 @@ The default run uses 1,000 AdamW optimizer steps per epoch, saves every epoch,
 and stops after 15 consecutive validation epochs with no decrease. `MIN_DELTA`
 defaults to zero so a slow but real decrease resets patience. Validation uses a
 fixed held-out split to prevent sampling noise from choosing checkpoints.
+Both player-perspective trajectories from the same Showdown battle are assigned
+to the same side of that split, preventing battle-level validation leakage.
+
+Numbered `policy_epoch_N.pt` files are chronological pre-validation snapshots.
+After early stopping, the restored winner is published only as
+`policy_actor_awr_final.pt` and `latest/policy.pt`; it is never assigned a fake
+next epoch number.
 
 Monitor `B1/AWR ESS Fraction` alongside policy KL, value KL,
 `B1/Actor Objective Loss`, and the unweighted `B1/Actor BC Loss`. A persistently

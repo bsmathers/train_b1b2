@@ -883,13 +883,12 @@ def run_actor_refinement(
         final_state = policy.state_dict()
         final_path = policy_dir / f"policy_{actor_mode}_final.pt"
         _atomic_torch_save(final_state, final_path)
-        _atomic_torch_save(final_state, policy_dir / f"policy_epoch_{completed_epochs}.pt")
         _atomic_torch_save(final_state, Path(experiment.ckpt_dir) / "latest" / "policy.pt")
         print(
             f"[{'B1AWRFinal' if actor_mode == 'actor_awr' else 'B1ActorFinal'}] "
             f"published restored validation-best {actor_mode} actor as "
-            f"{final_path.name}, policy_epoch_{completed_epochs}.pt, "
-            "and latest/policy.pt"
+            f"{final_path.name} and latest/policy.pt; numbered policy checkpoints "
+            "remain chronological"
         )
     experiment.accelerator.wait_for_everyone()
     experiment.epoch = completed_epochs
