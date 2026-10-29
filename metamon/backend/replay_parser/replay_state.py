@@ -138,13 +138,21 @@ class Move(PEMove):
         self._current_pp = pp
 
     def __deepcopy__(self, memo):
-        # poke-env stores a ton of data in each Move. it is faster
-        # to remake the object than copy it.
-        new = self.__class__(name=self.name, gen=self.gen_)
-        new.pp = self.pp
-        new._current_pp = self.pp
-        self.maximum_pp = self.maximum_pp
+        # All Move fields owned by this wrapper are immutable metadata or scalar
+        # counters. Re-running PEMove construction performs a dex lookup for
+        # every historical-turn copy (hundreds of thousands per collector
+        # round). Copy the instance dictionary instead: later PP mutations are
+        # scalar assignments and therefore remain independent.
+        new = self.__class__.__new__(self.__class__)
         memo[id(self)] = new
+        for slot in PEMove.__slots__:
+            value = getattr(self, slot)
+            # DynamaxMove is a derived lazy cache that may itself refer back to
+            # this instance. Recreate it on demand for the copied move.
+            if slot == "_dynamaxed_move":
+                value = None
+            setattr(new, slot, value)
+        new.__dict__ = self.__dict__.copy()
         return new
 
     def from_transform(self):
@@ -219,6 +227,50 @@ class Pokemon:
         if other is None:
             return False
         return self.unique_id == other.unique_id
+
+    def __deepcopy__(self, memo):
+        """Copy battle-mutating state without duplicating immutable dex data.
+
+        Turn history needs independent Pokemon, move, boost, effect and target
+        objects, with aliases preserved across active/team lists. Species dex
+        data and type-name lists are immutable in this parser and can safely be
+        shared. The generic deepcopy spent most collector time repeatedly
+        traversing those static structures.
+        """
+        existing = memo.get(id(self))
+        if existing is not None:
+            return existing
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        # Begin with scalar/static fields, then replace every battle-mutable
+        # container or cross-Pokemon reference below. This is substantially
+        # cheaper than sending each small dictionary and list through the
+        # generic deepcopy dispatcher.
+        new.__dict__ = self.__dict__.copy()
+        new.moves = {
+            name: copy.deepcopy(move, memo) for name, move in self.moves.items()
+        }
+        new.had_moves = {
+            name: copy.deepcopy(move, memo) for name, move in self.had_moves.items()
+        }
+        new.move_change_to_from = self.move_change_to_from.copy()
+        new.last_used_move = copy.deepcopy(self.last_used_move, memo)
+        new.boosts = Boosts(
+            self.boosts.atk_,
+            self.boosts.spa_,
+            self.boosts.def_,
+            self.boosts.spd_,
+            self.boosts.spe_,
+            self.boosts.accuracy_,
+            self.boosts.evasion_,
+        )
+        new.effects = self.effects.copy()
+        new.computed_stats = self.computed_stats.copy()
+        new.transformed_into = copy.deepcopy(self.transformed_into, memo)
+        new.last_target = copy.deepcopy(self.last_target, memo)
+        new.last_targeted_by = copy.deepcopy(self.last_targeted_by, memo)
+        new.tricking = copy.deepcopy(self.tricking, memo)
+        return new
 
     @staticmethod
     def _lookup_pokedex_info(name: str, gen: int):
@@ -743,20 +795,26 @@ class Turn:
                 pokemon.on_end_of_turn()
 
     def create_next_turn(self) -> "Turn":
-        next_turn = copy.deepcopy(self)
-        next_turn.moves_1 = [None, None]
-        next_turn.moves_2 = [None, None]
-        next_turn.choices_1 = [None, None]
-        next_turn.choices_2 = [None, None]
-        next_turn.subturns = []
+        # These fields are unconditionally empty in the next turn. Seeding the
+        # deepcopy memo with their final values avoids recursively copying the
+        # action/subturn graphs only to throw those copies away immediately.
+        # The persistent Pokemon, field, weather and preview state still takes
+        # the normal deepcopy path, including all shared-reference semantics.
+        memo = {
+            id(self.moves_1): [None, None],
+            id(self.moves_2): [None, None],
+            id(self.choices_1): [None, None],
+            id(self.choices_2): [None, None],
+            id(self.subturns): [],
+            id(self.replacements_1): [],
+            id(self.replacements_2): [],
+        }
+        next_turn = copy.deepcopy(self, memo)
         next_turn.turn_number += 1
-        next_turn.replacements_1 = []
-        next_turn.replacements_2 = []
         return next_turn
 
     def create_subturn(self, force_switch: bool) -> "Turn":
-        subturn = copy.deepcopy(self)
-        subturn.subturns = []
+        subturn = copy.deepcopy(self, {id(self.subturns): []})
         subturn.is_force_switch = force_switch
         return subturn
 

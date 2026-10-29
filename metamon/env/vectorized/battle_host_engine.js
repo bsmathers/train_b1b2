@@ -12,15 +12,87 @@ const { createEngineRequest } = require("./native_request");
  *
  * Implements the exact same binary IPC protocol as battle_host.js:
  *   stdin: JSON-lines commands (start, choose, choose_batch, reset, ping, close)
- *   stdout: binary frames (READY=0, CHUNK=1, HOST_ERROR=2, LANE_ERROR=3, PONG=4)
+ *   stdout: binary frames (READY=0, CHUNK=1, HOST_ERROR=2, LANE_ERROR=3,
+ *           PONG=4, PROFILE=5)
  */
 
 const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
 
-const MSG = { READY: 0, CHUNK: 1, HOST_ERROR: 2, LANE_ERROR: 3, PONG: 4 };
+const MSG = { READY: 0, CHUNK: 1, HOST_ERROR: 2, LANE_ERROR: 3, PONG: 4, PROFILE: 5 };
 const STREAM = { p1: 0, p2: 1, error: 2 };
+
+// These counters answer a narrower question than the Python wall profiler:
+// exactly how much synchronous host time is spent inside the native Zig
+// battle.update call, versus adapting its result into Showdown protocol.
+// Keep them disabled outside explicit profiles so hrtime calls cannot reduce
+// production collector throughput.
+const PROFILE = process.env.METAMON_VEC_PROFILE === "1";
+const profile = {
+  startedNs: process.hrtime.bigint(),
+  jsonParseNs: 0n,
+  commandHandleNs: 0n,
+  engineUpdateNs: 0n,
+  engineStartUpdateNs: 0n,
+  engineStartNs: 0n,
+  teamUnpackNs: 0n,
+  battleCreateNs: 0n,
+  logSetupNs: 0n,
+  choiceResolutionNs: 0n,
+  emitTurnNs: 0n,
+  logDecodeNs: 0n,
+  requestBuildNs: 0n,
+  frameWriteNs: 0n,
+  commands: 0,
+  starts: 0,
+  steps: 0,
+  chunks: 0,
+  payloadBytes: 0,
+  teamCacheHits: 0,
+  teamCacheMisses: 0,
+};
+
+function profileNow() {
+  return PROFILE ? process.hrtime.bigint() : 0n;
+}
+
+function profileAdd(key, started) {
+  if (PROFILE) profile[key] += process.hrtime.bigint() - started;
+}
+
+function emitProfile() {
+  const wallNs = process.hrtime.bigint() - profile.startedNs;
+  const lines = [
+    `wall_ns=${wallNs}`,
+    `json_parse_ns=${profile.jsonParseNs}`,
+    `command_handle_ns=${profile.commandHandleNs}`,
+    `engine_update_ns=${profile.engineUpdateNs}`,
+    `engine_start_update_ns=${profile.engineStartUpdateNs}`,
+    `engine_start_ns=${profile.engineStartNs}`,
+    `team_unpack_ns=${profile.teamUnpackNs}`,
+    `battle_create_ns=${profile.battleCreateNs}`,
+    `log_setup_ns=${profile.logSetupNs}`,
+    `choice_resolution_ns=${profile.choiceResolutionNs}`,
+    `emit_turn_ns=${profile.emitTurnNs}`,
+    `log_decode_ns=${profile.logDecodeNs}`,
+    `request_build_ns=${profile.requestBuildNs}`,
+    `frame_write_ns=${profile.frameWriteNs}`,
+    `commands=${profile.commands}`,
+    `starts=${profile.starts}`,
+    `steps=${profile.steps}`,
+    `chunks=${profile.chunks}`,
+    `payload_bytes=${profile.payloadBytes}`,
+    `team_cache_hits=${profile.teamCacheHits}`,
+    `team_cache_misses=${profile.teamCacheMisses}`,
+  ];
+  const payload = Buffer.from(lines.join("\n"), "utf8");
+  const frame = Buffer.alloc(5 + payload.length);
+  frame.writeUInt8(MSG.PROFILE, 0);
+  frame.writeUInt32LE(payload.length, 1);
+  payload.copy(frame, 5);
+  process.stdout.write(frame);
+}
 
 function emitReady() {
   const buf = Buffer.alloc(1);
@@ -55,6 +127,7 @@ function emitLaneError(lane, epoch, message) {
 }
 
 function emitChunk(lane, epoch, streamName, data) {
+  const started = profileNow();
   const payload = Buffer.from(String(data), "utf8");
   const streamId = STREAM[streamName] !== undefined ? STREAM[streamName] : STREAM.error;
   const frame = Buffer.alloc(14 + payload.length);
@@ -65,6 +138,11 @@ function emitChunk(lane, epoch, streamName, data) {
   frame.writeUInt32LE(payload.length, 10);
   payload.copy(frame, 14);
   process.stdout.write(frame);
+  if (PROFILE) {
+    profile.frameWriteNs += process.hrtime.bigint() - started;
+    profile.chunks += 1;
+    profile.payloadBytes += payload.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +290,29 @@ function stringifyProtocolLine(line) {
   return s;
 }
 
+// The Python team cache avoids reparsing team files, but every battle still
+// sends the same packed strings to this host. Showdown's unpack is pure and
+// @pkmn/engine copies each set into a fresh native battle buffer, so these
+// decoded inputs can be shared safely. Bound the map for nonstandard callers
+// that stream an effectively unlimited set of teams.
+const unpackedTeamCache = new Map();
+const MAX_UNPACKED_TEAMS = 4096;
+
+function unpackTeam(packed) {
+  const cached = unpackedTeamCache.get(packed);
+  if (cached !== undefined) {
+    if (PROFILE) profile.teamCacheHits += 1;
+    return cached;
+  }
+  const team = Showdown.Teams.unpack(packed);
+  unpackedTeamCache.set(packed, team);
+  if (PROFILE) profile.teamCacheMisses += 1;
+  if (unpackedTeamCache.size > MAX_UNPACKED_TEAMS) {
+    unpackedTeamCache.delete(unpackedTeamCache.keys().next().value);
+  }
+  return team;
+}
+
 class EngineLane {
   constructor(id) {
     this.id = id;
@@ -224,15 +325,19 @@ class EngineLane {
   }
 
   start(spec, p1spec, p2spec, epoch) {
+    const startStarted = profileNow();
     this.epoch = epoch;
     this.pendingChoices = { p1: null, p2: null };
     this.sentBattleHeader = false;
 
     try {
+      if (PROFILE) profile.starts += 1;
       const { Battle, Log, Lookup, Info } = pkmnEngine;
 
-      const p1Team = Showdown.Teams.unpack(p1spec.team);
-      const p2Team = Showdown.Teams.unpack(p2spec.team);
+      const unpackStarted = profileNow();
+      const p1Team = unpackTeam(p1spec.team);
+      const p2Team = unpackTeam(p2spec.team);
+      profileAdd("teamUnpackNs", unpackStarted);
       this.originalTeams = { p1: p1Team, p2: p2Team };
       this.playerNames = {
         p1: String(p1spec.name || "p1"),
@@ -244,6 +349,7 @@ class EngineLane {
         seed = spec.seed.slice(0, 4);
       }
 
+      const createStarted = profileNow();
       this.battle = Battle.create(gen1, {
         p1: { name: this.playerNames.p1, team: p1Team },
         p2: { name: this.playerNames.p2, team: p2Team },
@@ -251,7 +357,9 @@ class EngineLane {
         showdown: true,
         log: true,
       });
+      profileAdd("battleCreateNs", createStarted);
 
+      const logSetupStarted = profileNow();
       this.logParser = new Log(
         gen1,
         Lookup.get(gen1),
@@ -260,31 +368,45 @@ class EngineLane {
           p2: { name: this.playerNames.p2, team: p2Team },
         })
       );
+      profileAdd("logSetupNs", logSetupStarted);
 
+      const updateStarted = profileNow();
       const res0 = this.battle.update(undefined, undefined);
+      if (PROFILE) {
+        const elapsed = process.hrtime.bigint() - updateStarted;
+        profile.engineUpdateNs += elapsed;
+        profile.engineStartUpdateNs += elapsed;
+      }
       this.lastResult = res0;
       this._emitTurn(res0);
     } catch (err) {
       emitLaneError(this.id, epoch, `Engine start error: ${err.message}`);
+    } finally {
+      profileAdd("engineStartNs", startStarted);
     }
   }
 
   _emitTurn(res) {
+    const emitStarted = profileNow();
     try {
       // The engine Result is authoritative and is always from p1's
       // perspective.  Do not infer the winner from Side fields: @pkmn/engine
       // Side objects have no `fainted` property, so that inference appended a
       // bogus tie. Strip any terminal record decoded from the binary log and
       // append exactly one unambiguous record from Result below.
+      const logStarted = profileNow();
       const logLines = Array.from(this.logParser.parse(this.battle.log))
         .map(stringifyProtocolLine)
         .filter(line => line !== "|tie" && !line.startsWith("|win|"));
+      profileAdd("logDecodeNs", logStarted);
+      const requestStarted = profileNow();
       const reqP1 = createEngineRequest(
         this.battle, gen1, "p1", this.playerNames.p1, res, this.originalTeams.p1
       );
       const reqP2 = createEngineRequest(
         this.battle, gen1, "p2", this.playerNames.p2, res, this.originalTeams.p2
       );
+      profileAdd("requestBuildNs", requestStarted);
 
       // @pkmn/engine's compact battle log omits the simulator's player
       // declarations.  Metamon's replay parser needs those declarations to
@@ -322,6 +444,8 @@ class EngineLane {
       if (p2Parts.length > 0) emitChunk(this.id, this.epoch, "p2", p2Parts.join("\n"));
     } catch (err) {
       emitLaneError(this.id, this.epoch, `Engine emit error: ${err.message}`);
+    } finally {
+      profileAdd("emitTurnNs", emitStarted);
     }
   }
 
@@ -351,6 +475,7 @@ class EngineLane {
 
   _step() {
     try {
+      if (PROFILE) profile.steps += 1;
       const c1Str = this.pendingChoices.p1;
       const c2Str = this.pendingChoices.p2;
       this.pendingChoices = { p1: null, p2: null };
@@ -358,10 +483,14 @@ class EngineLane {
       const needP1 = !this.lastResult || this.lastResult.p1 !== "pass";
       const needP2 = !this.lastResult || this.lastResult.p2 !== "pass";
 
+      const choiceStarted = profileNow();
       const c1 = needP1 ? this._resolveChoice("p1", c1Str) : pkmnEngine.Choice.pass;
       const c2 = needP2 ? this._resolveChoice("p2", c2Str) : pkmnEngine.Choice.pass;
+      profileAdd("choiceResolutionNs", choiceStarted);
 
+      const updateStarted = profileNow();
       const res = this.battle.update(c1, c2);
+      profileAdd("engineUpdateNs", updateStarted);
       this.lastResult = res;
       this._emitTurn(res);
     } catch (err) {
@@ -435,6 +564,10 @@ function handleCommand(msg) {
       emitPong();
       break;
     }
+    case "profile": {
+      emitProfile();
+      break;
+    }
     case "close": {
       for (const lane of lanes.values()) lane.destroy();
       process.exit(0);
@@ -454,13 +587,18 @@ async function main() {
     if (!trimmed) return;
     let msg;
     try {
+      const parseStarted = profileNow();
       msg = JSON.parse(trimmed);
+      profileAdd("jsonParseNs", parseStarted);
     } catch (err) {
       emitHostError(`bad json: ${err.message}`);
       return;
     }
     try {
+      const handleStarted = profileNow();
       handleCommand(msg);
+      profileAdd("commandHandleNs", handleStarted);
+      if (PROFILE) profile.commands += 1;
     } catch (err) {
       emitLaneError(
         msg && msg.lane !== undefined ? msg.lane : 0,

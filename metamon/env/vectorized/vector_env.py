@@ -25,6 +25,8 @@ import json
 import os
 import random
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -96,6 +98,7 @@ class VectorizedShowdownEnv(gym.Env):
         teampreview_strategy=None,
         teampreview_seed: Optional[int] = None,
         player_team_set_config=None,
+        trajectory_writer_workers: int = 0,
     ):
         if eval_player_side not in (0, 1):
             raise ValueError(f"eval_player_side must be 0 or 1; got {eval_player_side}")
@@ -149,6 +152,40 @@ class VectorizedShowdownEnv(gym.Env):
             [] for _ in range(self.batched_envs)
         ]
         self._traj_actions: List[List[int]] = [[] for _ in range(self.batched_envs)]
+        # Optional Ataraxos metadata.  The generic replay format remains
+        # unchanged until ``record_policy_metadata`` is called by a collector.
+        self._traj_behavior_log_probs: List[List[List[float]]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._traj_behavior_values: List[List[float]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._traj_behavior_legal: List[List[List[bool]]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._pending_behavior_log_probs: Optional[np.ndarray] = None
+        self._pending_behavior_values: Optional[np.ndarray] = None
+        self._pending_behavior_legal: Optional[np.ndarray] = None
+        self._ataraxos_metadata_enabled = False
+        self._behavior_policy_id: Optional[str] = None
+        self._collection_game_target: Optional[int] = None
+        self._collection_games_saved = 0
+
+        # Compressing a full replay on the simulator thread creates avoidable
+        # bubbles.  Ataraxos enables a small bounded writer pool; the bound is
+        # important because UniversalState payloads are large and an unbounded
+        # queue can exhaust host RAM if storage stalls.
+        writer_workers = max(0, int(trajectory_writer_workers))
+        self._trajectory_writer = (
+            ThreadPoolExecutor(
+                max_workers=writer_workers,
+                thread_name_prefix="metamon-replay-writer",
+            )
+            if writer_workers
+            else None
+        )
+        self._trajectory_write_limit = max(1, writer_workers * 4)
+        self._trajectory_writes: deque[Future] = deque()
 
         self.player_username = player_username or (
             f"MMVecSD-{''.join(str(random.randint(0, 9)) for _ in range(8))}"
@@ -271,6 +308,9 @@ class VectorizedShowdownEnv(gym.Env):
             lines.append(
                 f"  {name}: {secs:.3f}s ({pct:.1f}%, {per_step*1000:.2f}ms/step)"
             )
+        proc = getattr(self, "proc", None)
+        if proc is not None and hasattr(proc, "profile_report"):
+            lines.append(proc.profile_report())
         return "\n".join(lines)
 
     # ----- lane lifecycle --------------------------------------------------
@@ -370,6 +410,77 @@ class VectorizedShowdownEnv(gym.Env):
         """Seed per-lane trajectory buffers with the eval POV at battle start."""
         self._traj_states[i] = [self.lanes[i].universal_state(self.eval_side)]
         self._traj_actions[i] = []
+        self._traj_behavior_log_probs[i] = []
+        self._traj_behavior_values[i] = []
+        self._traj_behavior_legal[i] = []
+
+    def set_behavior_policy_id(self, policy_id: str) -> None:
+        """Label subsequent native rollouts with an immutable policy identity."""
+        policy_id = str(policy_id).strip()
+        if not policy_id:
+            raise ValueError("behavior policy id must not be empty")
+        self._behavior_policy_id = policy_id
+
+    def set_collection_game_target(self, target: int) -> None:
+        """Cap this collector at exactly ``target`` saved decisive games."""
+        target = int(target)
+        if target <= 0:
+            raise ValueError(f"collection target must be positive, got {target}")
+        self._collection_game_target = target
+        self._collection_games_saved = 0
+
+    def collection_game_target_reached(self) -> bool:
+        return (
+            self._collection_game_target is not None
+            and self._collection_games_saved >= self._collection_game_target
+        )
+
+    def collection_game_count(self) -> int:
+        return int(self._collection_games_saved)
+
+    def record_policy_metadata(
+        self,
+        behavior_log_probs: np.ndarray,
+        behavior_values: np.ndarray,
+        behavior_legal: np.ndarray,
+    ) -> None:
+        """Attach exact behavior-policy outputs to the next vector action.
+
+        The metadata is supplied once per outer vector step and copied into the
+        per-lane replay only after the native adapter confirms which action was
+        committed.  Ataraxos can therefore reject repaired/illegal actions
+        instead of training against a distribution that did not produce them.
+        """
+        action_dim = self.eval_action_space.gym_space.n
+        expected = (self.batched_envs, action_dim)
+        log_probs = np.asarray(behavior_log_probs, dtype=np.float32)
+        values = np.asarray(behavior_values, dtype=np.float32)
+        legal = np.asarray(behavior_legal, dtype=bool)
+        if log_probs.shape != expected:
+            raise ValueError(
+                f"behavior log-prob shape {log_probs.shape}, expected {expected}"
+            )
+        if legal.shape != expected:
+            raise ValueError(f"behavior legal-mask shape {legal.shape}, expected {expected}")
+        if values.shape not in ((self.batched_envs,), (self.batched_envs, 1)):
+            raise ValueError(
+                f"behavior value shape {values.shape}, expected "
+                f"{(self.batched_envs,)} or {(self.batched_envs, 1)}"
+            )
+        values = values.reshape(self.batched_envs)
+        if not np.isfinite(log_probs).all() or not np.isfinite(values).all():
+            raise ValueError("behavior metadata contains non-finite values")
+        if np.any(np.abs(values) > 1.0001):
+            raise ValueError("behavior values must be bounded to [-1, 1]")
+        probs = np.exp(log_probs)
+        if not np.allclose(probs.sum(-1), 1.0, atol=2e-3, rtol=0.0):
+            raise ValueError("behavior probabilities do not sum to one")
+        if np.any(probs[~legal] > 1e-8):
+            raise ValueError("behavior policy assigns mass to an illegal action")
+        self._ataraxos_metadata_enabled = True
+        self._pending_behavior_log_probs = log_probs
+        self._pending_behavior_values = values
+        self._pending_behavior_legal = legal
 
     def _derived_seed(self, lane: int, game_index: int, stream: int) -> int:
         """Stable per-game seed independent of asynchronous completion order."""
@@ -652,6 +763,32 @@ class VectorizedShowdownEnv(gym.Env):
                 )
         return obs_list
 
+    def opponent_decision_inputs(
+        self,
+    ) -> Tuple[np.ndarray, np.ndarray, List[dict]]:
+        """Build the opponent decision batch before :meth:`step`.
+
+        Joint self-play inference uses this to evaluate both physical players in
+        one model call. The opponent advertises the resulting prefetched actions,
+        so ``step`` does not run stateful observation encoding a second time.
+        """
+        acting = [
+            i
+            for i in range(self.batched_envs)
+            if not self.lanes[i].ended
+            and self.lanes[i].needs_agent_decision(self.eval_side)
+            and self.lanes[i]._side_ready(self.eval_side)
+        ]
+        eval_active = np.zeros((self.batched_envs,), dtype=bool)
+        eval_active[acting] = True
+        active = np.zeros((self.batched_envs,), dtype=bool)
+        for i in acting:
+            if self.lanes[i].needs_agent_decision(self.opp_side) and self.lanes[
+                i
+            ]._side_ready(self.opp_side):
+                active[i] = True
+        return eval_active, active, self._opp_obs_list(active)
+
     def _teampreview_choice(self, i: int, side: str) -> str:
         """Resolve a single side's team-preview choice for lane ``i``.
 
@@ -765,20 +902,33 @@ class VectorizedShowdownEnv(gym.Env):
     def _record_opp_rewards(
         self, opp_pending: List[Tuple[int, int, UniversalState]]
     ) -> None:
-        if self.opponent_reward_function is None:
-            for i, used_idx, _ in opp_pending:
-                final_idx = self._committed_side_actions.get(
+        if not opp_pending:
+            return
+        lanes = np.fromiter(
+            (item[0] for item in opp_pending), dtype=np.int64, count=len(opp_pending)
+        )
+        actions = np.fromiter(
+            (
+                self._committed_side_actions.get(
                     (i, self.opp_side), int(used_idx)
                 )
-                self.opponent.observe(i, 0.0, final_idx)
-            return
-        for i, used_idx, prev_opp in opp_pending:
-            new_opp = self.lanes[i].universal_state(self.opp_side)
-            reward = float(self.opponent_reward_function(prev_opp, new_opp))
-            final_idx = self._committed_side_actions.get(
-                (i, self.opp_side), int(used_idx)
+                for i, used_idx, _ in opp_pending
+            ),
+            dtype=np.int64,
+            count=len(opp_pending),
+        )
+        if self.opponent_reward_function is None:
+            self.opponent.observe_batch(
+                lanes, np.zeros(len(opp_pending), dtype=np.float32), actions
             )
-            self.opponent.observe(i, reward, final_idx)
+            return
+        rewards = np.empty(len(opp_pending), dtype=np.float32)
+        for offset, (i, _used_idx, prev_opp) in enumerate(opp_pending):
+            new_opp = self.lanes[i].universal_state(self.opp_side)
+            rewards[offset] = float(
+                self.opponent_reward_function(prev_opp, new_opp)
+            )
+        self.opponent.observe_batch(lanes, rewards, actions)
 
     # ----- gym API ---------------------------------------------------------
 
@@ -840,22 +990,27 @@ class VectorizedShowdownEnv(gym.Env):
             and self.lanes[i]._side_ready(self.eval_side)
         ]
 
-        with self._profile_section("resolve_actions"):
-            # The opponent moves simultaneously with the eval side on a normal
-            # turn (and switches alongside an eval force-switch on a double KO),
-            # so answer it in the same cycle when it also owes a decision.
-            opp_active = np.zeros((self.batched_envs,), dtype=bool)
-            for i in acting:
-                if self.lanes[i].needs_agent_decision(self.opp_side) and self.lanes[
-                    i
-                ]._side_ready(self.opp_side):
-                    opp_active[i] = True
-            with self._profile_section("opponent_act"):
-                opp_actions = (
-                    self.opponent.act(opp_active, self._opp_obs_list(opp_active))
-                    if opp_active.any()
-                    else None
+        # The opponent moves simultaneously with the eval side on a normal
+        # turn (and switches alongside an eval force-switch on a double KO),
+        # so answer it in the same cycle when it also owes a decision.
+        opp_active = np.zeros((self.batched_envs,), dtype=bool)
+        for i in acting:
+            if self.lanes[i].needs_agent_decision(self.opp_side) and self.lanes[
+                i
+            ]._side_ready(self.opp_side):
+                opp_active[i] = True
+        with self._profile_section("opponent_act"):
+            opp_actions = (
+                self.opponent.act(
+                    opp_active,
+                    []
+                    if self.opponent.has_prefetched_actions(opp_active)
+                    else self._opp_obs_list(opp_active),
                 )
+                if opp_active.any()
+                else None
+            )
+        with self._profile_section("resolve_actions"):
             choices: List[Tuple[int, str, str]] = []
             for i in acting:
                 lane = self.lanes[i]
@@ -881,12 +1036,13 @@ class VectorizedShowdownEnv(gym.Env):
                 self._append_lane_choices(choices, i, side_choices)
                 lane.mark_settled()
                 acted_lanes.append(i)
-            with self._profile_section("choose_batch"):
-                self.proc.choose_batch(choices)
-            with self._profile_section("pump_settle"):
-                self._pump_settle(acting)
+        with self._profile_section("choose_batch"):
+            self.proc.choose_batch(choices)
+        with self._profile_section("pump_settle"):
+            self._pump_settle(acting)
 
-        self._record_opp_rewards(opp_pending)
+        with self._profile_section("opponent_feedback"):
+            self._record_opp_rewards(opp_pending)
 
         # Auto-resolve opponent-only cycles (e.g. opponent fainted, eval side waits)
         # until every live lane is parked back at an eval-side decision.
@@ -904,7 +1060,32 @@ class VectorizedShowdownEnv(gym.Env):
                     rewards[i] = float(self.eval_reward_function(prev, new_eval))
                 self._cycle_prev_eval[i] = None
                 if self._saving and eval_actions[i] is not None:
+                    if self._ataraxos_metadata_enabled and (
+                        self._pending_behavior_log_probs is None
+                        or self._pending_behavior_values is None
+                        or self._pending_behavior_legal is None
+                    ):
+                        raise RuntimeError(
+                            "Ataraxos rollout action is missing behavior metadata"
+                        )
+                    if self._ataraxos_metadata_enabled and int(eval_actions[i]) != int(
+                        actions[i]
+                    ):
+                        raise RuntimeError(
+                            "native action adapter repaired an Ataraxos action; "
+                            "refusing misaligned behavior data"
+                        )
                     self._traj_actions[i].append(int(eval_actions[i]))
+                    if self._ataraxos_metadata_enabled:
+                        self._traj_behavior_log_probs[i].append(
+                            self._pending_behavior_log_probs[i].tolist()
+                        )
+                        self._traj_behavior_values[i].append(
+                            float(self._pending_behavior_values[i])
+                        )
+                        self._traj_behavior_legal[i].append(
+                            self._pending_behavior_legal[i].tolist()
+                        )
                     self._traj_states[i].append(new_eval)
                 hit_limit = self._lane_steps[i] >= self.turn_limit
                 if lane.ended or hit_limit:
@@ -940,6 +1121,9 @@ class VectorizedShowdownEnv(gym.Env):
                     restarted.append(i)
 
         done_mask = terminated | truncated
+        self._pending_behavior_log_probs = None
+        self._pending_behavior_values = None
+        self._pending_behavior_legal = None
         if done_mask.any():
             self.opponent.reset_lanes(done_mask)
         if restarted:
@@ -969,25 +1153,64 @@ class VectorizedShowdownEnv(gym.Env):
 
     def _save_lane_outcome(self, i: int, final_state: UniversalState) -> None:
         """Write a finished lane's trajectory and/or result log (parsed-replay format)."""
-        result = "WIN" if final_state.battle_won else "LOSS"
+        if final_state.battle_won:
+            result = "WIN"
+        elif final_state.battle_lost:
+            result = "LOSS"
+        else:
+            result = "UNRESOLVED"
         battle_id = "".join(str(random.randint(0, 9)) for _ in range(10))
         timestamp = datetime.now().strftime("%m-%d-%Y-%H:%M:%S")
         opponent_name = self.metamon_opponent_name
 
-        if self.save_trajectories_to is not None:
+        save_training_trajectory = not (
+            self._ataraxos_metadata_enabled and result == "UNRESOLVED"
+        )
+        if (
+            save_training_trajectory
+            and self._collection_game_target is not None
+            and self._collection_games_saved >= self._collection_game_target
+        ):
+            save_training_trajectory = False
+
+        if self.save_trajectories_to is not None and save_training_trajectory:
             filename = (
                 f"metamon-{self.metamon_battle_format}-{battle_id}_Unrated_"
                 f"{self.player_username}_vs_{opponent_name}_{timestamp}_{result}.json.lz4"
             )
             output_json = {
-                "states": [s.to_dict() for s in self._traj_states[i]],
+                # Conversion to nested dictionaries is deliberately deferred to
+                # the writer thread. UniversalState snapshots are immutable and
+                # the lane replaces this list rather than mutating it on reset.
+                "states": self._traj_states[i],
                 "actions": self._traj_actions[i] + [-1],
             }
+            if self._ataraxos_metadata_enabled:
+                lengths = {
+                    len(self._traj_actions[i]),
+                    len(self._traj_behavior_log_probs[i]),
+                    len(self._traj_behavior_values[i]),
+                    len(self._traj_behavior_legal[i]),
+                }
+                if len(lengths) != 1:
+                    raise RuntimeError(
+                        "Ataraxos behavior metadata is not action-aligned"
+                    )
+                if self._behavior_policy_id is None:
+                    raise RuntimeError("Ataraxos behavior policy id was not set")
+                output_json.update(
+                    {
+                        "ataraxos_collector_version": 1,
+                        "behavior_policy_id": self._behavior_policy_id,
+                        "behavior_log_probs": self._traj_behavior_log_probs[i],
+                        "behavior_values": self._traj_behavior_values[i],
+                        "behavior_legal_masks": self._traj_behavior_legal[i],
+                    }
+                )
             path = os.path.join(self.save_trajectories_to, filename)
-            temp_path = path + ".tmp"
-            with lz4.frame.open(temp_path, "wb") as f:
-                f.write(json.dumps(output_json).encode("utf-8"))
-            os.rename(temp_path, path)
+            self._submit_trajectory_write(path, output_json)
+            if self._collection_game_target is not None and result in ("WIN", "LOSS"):
+                self._collection_games_saved += 1
 
         if self.save_results_to is not None:
             with open(self.save_results_to, "a") as f:
@@ -997,7 +1220,44 @@ class VectorizedShowdownEnv(gym.Env):
                     f"{battle_id}\n"
                 )
 
+    @staticmethod
+    def _write_trajectory(path: str, payload: dict) -> None:
+        temp_path = path + ".tmp"
+        try:
+            serializable = dict(payload)
+            serializable["states"] = [
+                state.to_dict() if hasattr(state, "to_dict") else state
+                for state in payload["states"]
+            ]
+            encoded = json.dumps(serializable, separators=(",", ":")).encode(
+                "utf-8"
+            )
+            with lz4.frame.open(temp_path, "wb") as stream:
+                stream.write(encoded)
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def _submit_trajectory_write(self, path: str, payload: dict) -> None:
+        if self._trajectory_writer is None:
+            self._write_trajectory(path, payload)
+            return
+        while len(self._trajectory_writes) >= self._trajectory_write_limit:
+            self._trajectory_writes.popleft().result()
+        self._trajectory_writes.append(
+            self._trajectory_writer.submit(self._write_trajectory, path, payload)
+        )
+
+    def flush_trajectory_writes(self) -> None:
+        while self._trajectory_writes:
+            self._trajectory_writes.popleft().result()
+
     def close(self) -> None:
+        self.flush_trajectory_writes()
+        if self._trajectory_writer is not None:
+            self._trajectory_writer.shutdown(wait=True)
+            self._trajectory_writer = None
         if self._profile and self._profile_steps and not self._profile_reported:
             self._profile_reported = True
             print(self.profile_report(), flush=True)

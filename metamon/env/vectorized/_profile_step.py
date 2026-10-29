@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -22,6 +23,7 @@ from metamon.interface import (
     DefaultShapedReward,
 )
 from metamon.env.vectorized import RandomBatchedOpponent, VectorizedShowdownEnv
+from metamon.env import get_metamon_teams
 
 
 def main() -> None:
@@ -29,6 +31,20 @@ def main() -> None:
     parser.add_argument("--lanes", type=int, default=128)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--format", default="gen9randombattle")
+    parser.add_argument(
+        "--team-set",
+        help="Named team cache used by formats that do not provide random teams.",
+    )
+    parser.add_argument(
+        "--raw-team-files",
+        action="store_true",
+        help="Profile-only shortcut for explicit team files; bypass prediction normalization.",
+    )
+    parser.add_argument(
+        "--team-limit",
+        type=int,
+        help="Restrict profiling to the first N team files (useful for cache tests).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--n_workers",
@@ -52,10 +68,21 @@ def main() -> None:
     reward = DefaultShapedReward()
     action_dim = act_space.gym_space.n
 
-    opponent = RandomBatchedOpponent(num_lanes=n, action_dim=action_dim)
+    opponent = RandomBatchedOpponent(
+        num_lanes=n, action_dim=action_dim, rng=np.random.default_rng(args.seed)
+    )
+    teams = get_metamon_teams(args.format, args.team_set) if args.team_set else None
+    if teams is not None and args.team_limit is not None:
+        teams.team_files = teams.team_files[: max(1, args.team_limit)]
+    if teams is not None and args.raw_team_files:
+        for file in teams.team_files:
+            raw = Path(file).read_text(encoding="utf-8")
+            teams._packed_team_cache[file] = teams.join_team(
+                teams.parse_showdown_team(raw)
+            )
     env = VectorizedShowdownEnv(
-        player_team_set=None,
-        opponent_team_set=None,
+        player_team_set=teams,
+        opponent_team_set=teams,
         opponent=opponent,
         opponent_obs_space=obs_space,
         opponent_action_space=act_space,

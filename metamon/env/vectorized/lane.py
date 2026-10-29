@@ -27,9 +27,13 @@ from typing import Dict, List, Optional, Tuple
 
 import metamon.backend
 from metamon.env.metamon_battle import MetamonBackendBattle
-from metamon.env.vectorized.native_legal import canonical_legal_indices
+from metamon.env.vectorized.native_legal import (
+    canonical_legal_indices,
+    default_action_legal_indices,
+)
 from metamon.interface import (
     ActionSpace,
+    DefaultActionSpace,
     UniversalAction,
     UniversalState,
 )
@@ -74,6 +78,7 @@ class StreamBattleLane:
         self.reprompt_pending: Dict[str, bool] = {s: False for s in SIDES}
         self._mutation_serial: Dict[str, int] = {s: 0 for s in SIDES}
         self._state_cache: Dict[str, Tuple[int, UniversalState]] = {}
+        self._legal_cache: Dict[Tuple[str, int, int], Tuple[int, ...]] = {}
         self.reset_state()
 
     # ----- lifecycle -------------------------------------------------------
@@ -98,6 +103,7 @@ class StreamBattleLane:
             self.reprompt_pending[side] = False
             self._mutation_serial[side] = 0
             self._state_cache.pop(side, None)
+        self._legal_cache.clear()
         self.ended = False
         self.winner = None
 
@@ -268,15 +274,50 @@ class StreamBattleLane:
         state: Optional[UniversalState] = None,
     ) -> List[int]:
         """Legal agent-action indices, mirroring ``PokeEnvWrapper._update_legal_actions``."""
+        # Observation construction and action translation ask for the same
+        # legal set at the same decision point. Computing it twice is expensive:
+        # it walks every candidate through poke-env's BattleOrder machinery.
+        # Mutation serials change on every parsed request/protocol update, so
+        # this cache cannot survive into a different simulator state.
+        cache_key = (side, self._mutation_serial[side], id(action_space))
+        cached = self._legal_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
         battle = self._battles[side]
         if state is None:
             state = self.universal_state(side)
-        legal_actions = UniversalAction.definitely_valid_actions(
-            state=state, battle=battle
-        )
-        encoded = [
-            action_space.action_to_agent_output(state=state, action=action)
-            for action in legal_actions
-        ]
-
-        return canonical_legal_indices(encoded, self.last_request[side])
+        if type(action_space) is DefaultActionSpace:
+            legal = default_action_legal_indices(
+                state, battle, self.last_request[side]
+            )
+            if os.environ.get("METAMON_NATIVE_VERIFY_FAST_LEGAL") == "1":
+                generic_actions = UniversalAction.definitely_valid_actions(
+                    state=state, battle=battle
+                )
+                generic = canonical_legal_indices(
+                    [
+                        action_space.action_to_agent_output(
+                            state=state, action=action
+                        )
+                        for action in generic_actions
+                    ],
+                    self.last_request[side],
+                )
+                if sorted(legal) != sorted(generic):
+                    raise RuntimeError(
+                        "fast native legal mask disagrees with DefaultActionSpace: "
+                        f"fast={legal}, generic={generic}, request="
+                        f"{self.last_request[side]}"
+                    )
+        else:
+            legal_actions = UniversalAction.definitely_valid_actions(
+                state=state, battle=battle
+            )
+            encoded = [
+                action_space.action_to_agent_output(state=state, action=action)
+                for action in legal_actions
+            ]
+            legal = canonical_legal_indices(encoded, self.last_request[side])
+        self._legal_cache[cache_key] = tuple(legal)
+        return legal

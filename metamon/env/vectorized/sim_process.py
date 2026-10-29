@@ -35,11 +35,22 @@ MSG_CHUNK = 1
 MSG_HOST_ERROR = 2
 MSG_LANE_ERROR = 3
 MSG_PONG = 4
+MSG_PROFILE = 5
 
 _STREAM_BY_ID = ("p1", "p2", "error")
 _CHUNK_BODY = struct.Struct("<BIIBI")  # type, lane, epoch, stream_id, data_len
 _HOST_ERROR_BODY = struct.Struct("<BI")  # type, data_len
 _LANE_ERROR_BODY = struct.Struct("<BIII")  # type, lane, epoch, data_len
+_PROFILE_BODY = struct.Struct("<BI")  # type, data_len
+
+
+def _parse_profile_payload(payload: str) -> Dict[str, int]:
+    values: Dict[str, int] = {}
+    for line in payload.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = int(value)
+    return values
 
 
 class LaneHandler(Protocol):
@@ -93,6 +104,8 @@ class ShowdownSimProcess:
         self._epoch: Dict[int, int] = {}
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._closed = False
+        self._profile = os.environ.get("METAMON_VEC_PROFILE") == "1"
+        self._profile_stats: Dict[str, float] = {}
         self._write_lock = threading.Lock()
         self._stderr_lines: list[str] = []
         self._stdout_buf = bytearray()
@@ -128,6 +141,21 @@ class ShowdownSimProcess:
                 continue
             if msg_type == MSG_PONG:
                 self._inbox.put({"event": "pong"})
+                continue
+            if msg_type == MSG_PROFILE:
+                body = self._read_exact(_PROFILE_BODY.size - 1)
+                if body is None:
+                    break
+                (data_len,) = _PROFILE_BODY.unpack(type_b + body)[1:]
+                data_b = self._read_exact(data_len)
+                if data_b is None:
+                    break
+                self._inbox.put(
+                    {
+                        "event": "profile",
+                        "profile": _parse_profile_payload(data_b.decode("utf-8")),
+                    }
+                )
                 continue
             if msg_type == MSG_CHUNK:
                 body = self._read_exact(_CHUNK_BODY.size - 1)
@@ -214,6 +242,7 @@ class ShowdownSimProcess:
         )
 
     def _send(self, msg: dict) -> None:
+        started = time.perf_counter() if self._profile else 0.0
         if self._closed:
             raise ShowdownSimProcessError("send on closed ShowdownSimProcess")
         if self._proc.poll() is not None:
@@ -227,6 +256,13 @@ class ShowdownSimProcess:
             assert self._proc.stdin is not None
             self._proc.stdin.write(line)
             self._proc.stdin.flush()
+        if self._profile:
+            self._profile_stats["send_seconds"] = self._profile_stats.get(
+                "send_seconds", 0.0
+            ) + (time.perf_counter() - started)
+            self._profile_stats["send_calls"] = self._profile_stats.get(
+                "send_calls", 0.0
+            ) + 1.0
 
     # ----- public commands -------------------------------------------------
 
@@ -337,21 +373,117 @@ class ShowdownSimProcess:
                     + self.stderr_tail
                 )
             try:
+                wait_started = time.perf_counter() if self._profile else 0.0
                 msg = self._inbox.get(timeout=min(idle_timeout, remaining))
+                if self._profile:
+                    self._profile_stats["host_wait_seconds"] = self._profile_stats.get(
+                        "host_wait_seconds", 0.0
+                    ) + (time.perf_counter() - wait_started)
             except queue.Empty:
                 raise ShowdownSimProcessError(
                     f"pump_until idle for {idle_timeout}s (host produced no "
                     "output). stderr:\n" + self.stderr_tail
                 )
+            dispatch_started = time.perf_counter() if self._profile else 0.0
             self._dispatch(msg)
+            if self._profile:
+                self._profile_stats["dispatch_seconds"] = self._profile_stats.get(
+                    "dispatch_seconds", 0.0
+                ) + (time.perf_counter() - dispatch_started)
+                self._profile_stats["messages"] = self._profile_stats.get(
+                    "messages", 0.0
+                ) + 1.0
             while True:
                 try:
                     msg = self._inbox.get_nowait()
                 except queue.Empty:
                     break
+                dispatch_started = time.perf_counter() if self._profile else 0.0
                 self._dispatch(msg)
+                if self._profile:
+                    self._profile_stats["dispatch_seconds"] = self._profile_stats.get(
+                        "dispatch_seconds", 0.0
+                    ) + (time.perf_counter() - dispatch_started)
+                    self._profile_stats["messages"] = self._profile_stats.get(
+                        "messages", 0.0
+                    ) + 1.0
             if predicate():
                 return
+
+    def profile_snapshot(self, timeout: float = 5.0) -> Dict[str, int]:
+        """Return exact native-host counters after all battle traffic settles."""
+        if not self._profile:
+            return {}
+        self._send({"cmd": "profile"})
+        deadline = time.monotonic() + timeout
+        deferred: List[dict] = []
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ShowdownSimProcessError("timed out waiting for host profile")
+                msg = self._inbox.get(timeout=remaining)
+                if msg.get("event") == "profile":
+                    return dict(msg["profile"])
+                deferred.append(msg)
+        finally:
+            for msg in deferred:
+                self._inbox.put(msg)
+
+    def profile_report(self) -> str:
+        if not self._profile:
+            return "native boundary profile disabled"
+        host = self.profile_snapshot()
+        zig = host.get("engine_update_ns", 0) / 1e9
+        command = host.get("command_handle_ns", 0) / 1e9
+        parse = host.get("json_parse_ns", 0) / 1e9
+        host_active = command + parse
+        adapter = max(0.0, host_active - zig)
+        startup = host.get("engine_start_ns", 0) / 1e9
+        startup_zig = host.get("engine_start_update_ns", 0) / 1e9
+        steady_active = max(0.0, host_active - startup)
+        steady_zig = max(0.0, zig - startup_zig)
+        steady_adapter = max(0.0, steady_active - steady_zig)
+        wait = self._profile_stats.get("host_wait_seconds", 0.0)
+        dispatch = self._profile_stats.get("dispatch_seconds", 0.0)
+        send = self._profile_stats.get("send_seconds", 0.0)
+        pump = wait + dispatch + send
+        lines = [
+            "native boundary profile (single host):",
+            f"  Zig battle.update: {zig:.3f}s "
+            f"({100.0 * zig / max(host_active, 1e-9):.1f}% of host active time)",
+            f"  Node adaptation outside Zig: {adapter:.3f}s "
+            f"({100.0 * adapter / max(host_active, 1e-9):.1f}% of host active time)",
+            f"  Node battle startup (inclusive): {startup:.3f}s",
+            f"  Steady Zig turns: {steady_zig:.3f}s "
+            f"({100.0 * steady_zig / max(steady_active, 1e-9):.1f}% of steady host time)",
+            f"  Steady Node adaptation: {steady_adapter:.3f}s "
+            f"({100.0 * steady_adapter / max(steady_active, 1e-9):.1f}% of steady host time)",
+            f"  Python waiting for host output: {wait:.3f}s "
+            f"({100.0 * wait / max(pump, 1e-9):.1f}% of pump boundary)",
+            f"  Python dispatch/state parsing: {dispatch:.3f}s "
+            f"({100.0 * dispatch / max(pump, 1e-9):.1f}% of pump boundary)",
+            f"  Python command send: {send:.3f}s "
+            f"({100.0 * send / max(pump, 1e-9):.1f}% of pump boundary)",
+        ]
+        for key in (
+            "team_unpack_ns",
+            "battle_create_ns",
+            "log_setup_ns",
+            "choice_resolution_ns",
+            "emit_turn_ns",
+            "log_decode_ns",
+            "request_build_ns",
+            "frame_write_ns",
+        ):
+            lines.append(f"  Node {key.removesuffix('_ns')}: {host.get(key, 0) / 1e9:.3f}s")
+        lines.append(
+            f"  turns={host.get('steps', 0)} starts={host.get('starts', 0)} "
+            f"chunks={host.get('chunks', 0)} team_cache="
+            f"{host.get('team_cache_hits', 0)} hits/"
+            f"{host.get('team_cache_misses', 0)} misses"
+        )
+        return "\n".join(lines)
 
     # ----- lifecycle -------------------------------------------------------
 
@@ -429,6 +561,8 @@ class ShardedShowdownSimProcess:
         self._epoch: Dict[int, int] = {}
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._closed = False
+        self._profile = os.environ.get("METAMON_VEC_PROFILE") == "1"
+        self._profile_stats: Dict[str, float] = {}
 
         self._worker_bases: List[int] = []
         self._worker_counts: List[int] = []
@@ -482,6 +616,11 @@ class ShardedShowdownSimProcess:
                 self._inbox.put({"event": "_eof", "worker": worker_id})
                 return
             if event in ("ready", "pong"):
+                continue
+            if event == "profile":
+                msg = dict(msg)
+                msg["worker"] = worker_id
+                self._inbox.put(msg)
                 continue
             local_lane = msg.get("lane")
             if local_lane is not None:
@@ -579,21 +718,129 @@ class ShardedShowdownSimProcess:
                     + self.stderr_tail
                 )
             try:
+                wait_started = time.perf_counter() if self._profile else 0.0
                 msg = self._inbox.get(timeout=min(idle_timeout, remaining))
+                if self._profile:
+                    self._profile_stats["host_wait_seconds"] = self._profile_stats.get(
+                        "host_wait_seconds", 0.0
+                    ) + (time.perf_counter() - wait_started)
             except queue.Empty:
                 raise ShowdownSimProcessError(
                     f"pump_until idle for {idle_timeout}s (host produced no "
                     "output). stderr:\n" + self.stderr_tail
                 )
+            dispatch_started = time.perf_counter() if self._profile else 0.0
             self._dispatch(msg)
+            if self._profile:
+                self._profile_stats["dispatch_seconds"] = self._profile_stats.get(
+                    "dispatch_seconds", 0.0
+                ) + (time.perf_counter() - dispatch_started)
             while True:
                 try:
                     msg = self._inbox.get_nowait()
                 except queue.Empty:
                     break
+                dispatch_started = time.perf_counter() if self._profile else 0.0
                 self._dispatch(msg)
+                if self._profile:
+                    self._profile_stats["dispatch_seconds"] = self._profile_stats.get(
+                        "dispatch_seconds", 0.0
+                    ) + (time.perf_counter() - dispatch_started)
             if predicate():
                 return
+
+    def profile_snapshot(self, timeout: float = 5.0) -> Dict[str, int]:
+        if not self._profile:
+            return {}
+        for proc in self._workers:
+            proc._send({"cmd": "profile"})
+        deadline = time.monotonic() + timeout
+        pending = set(range(self._n_workers))
+        snapshots: Dict[int, Dict[str, int]] = {}
+        deferred: List[dict] = []
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ShowdownSimProcessError("timed out waiting for host profiles")
+                msg = self._inbox.get(timeout=remaining)
+                if msg.get("event") == "profile":
+                    worker = int(msg["worker"])
+                    snapshots[worker] = dict(msg["profile"])
+                    pending.discard(worker)
+                else:
+                    deferred.append(msg)
+        finally:
+            for msg in deferred:
+                self._inbox.put(msg)
+        totals: Dict[str, int] = {}
+        for snapshot in snapshots.values():
+            for key, value in snapshot.items():
+                if key == "wall_ns":
+                    totals[key] = max(totals.get(key, 0), value)
+                else:
+                    totals[key] = totals.get(key, 0) + value
+        totals["workers"] = self._n_workers
+        return totals
+
+    def profile_report(self) -> str:
+        if not self._profile:
+            return "native boundary profile disabled"
+        host = self.profile_snapshot()
+        zig = host.get("engine_update_ns", 0) / 1e9
+        command = host.get("command_handle_ns", 0) / 1e9
+        parse = host.get("json_parse_ns", 0) / 1e9
+        host_active = command + parse
+        adapter = max(0.0, host_active - zig)
+        startup = host.get("engine_start_ns", 0) / 1e9
+        startup_zig = host.get("engine_start_update_ns", 0) / 1e9
+        steady_active = max(0.0, host_active - startup)
+        steady_zig = max(0.0, zig - startup_zig)
+        steady_adapter = max(0.0, steady_active - steady_zig)
+        wait = self._profile_stats.get("host_wait_seconds", 0.0)
+        dispatch = self._profile_stats.get("dispatch_seconds", 0.0)
+        send = sum(
+            proc._profile_stats.get("send_seconds", 0.0) for proc in self._workers
+        )
+        pump = wait + dispatch + send
+        lines = [
+            f"native boundary profile ({self._n_workers} hosts; host times summed):",
+            f"  Zig battle.update: {zig:.3f}s "
+            f"({100.0 * zig / max(host_active, 1e-9):.1f}% of host active time)",
+            f"  Node adaptation outside Zig: {adapter:.3f}s "
+            f"({100.0 * adapter / max(host_active, 1e-9):.1f}% of host active time)",
+            f"  Node battle startup (inclusive): {startup:.3f}s",
+            f"  Steady Zig turns: {steady_zig:.3f}s "
+            f"({100.0 * steady_zig / max(steady_active, 1e-9):.1f}% of steady host time)",
+            f"  Steady Node adaptation: {steady_adapter:.3f}s "
+            f"({100.0 * steady_adapter / max(steady_active, 1e-9):.1f}% of steady host time)",
+            f"  Python waiting for host output: {wait:.3f}s "
+            f"({100.0 * wait / max(pump, 1e-9):.1f}% of pump boundary)",
+            f"  Python dispatch/state parsing: {dispatch:.3f}s "
+            f"({100.0 * dispatch / max(pump, 1e-9):.1f}% of pump boundary)",
+            f"  Python command send: {send:.3f}s "
+            f"({100.0 * send / max(pump, 1e-9):.1f}% of pump boundary)",
+        ]
+        for key in (
+            "team_unpack_ns",
+            "battle_create_ns",
+            "log_setup_ns",
+            "choice_resolution_ns",
+            "emit_turn_ns",
+            "log_decode_ns",
+            "request_build_ns",
+            "frame_write_ns",
+        ):
+            lines.append(
+                f"  Node {key.removesuffix('_ns')}: {host.get(key, 0) / 1e9:.3f}s"
+            )
+        lines.append(
+            f"  turns={host.get('steps', 0)} starts={host.get('starts', 0)} "
+            f"chunks={host.get('chunks', 0)} team_cache="
+            f"{host.get('team_cache_hits', 0)} hits/"
+            f"{host.get('team_cache_misses', 0)} misses"
+        )
+        return "\n".join(lines)
 
     def close(self) -> None:
         if self._closed:

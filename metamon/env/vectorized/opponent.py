@@ -47,11 +47,24 @@ class BatchedOpponent(ABC):
     def observe(self, lane_idx: int, reward: float, action_idx: int) -> None:
         """Record the reward/action for ``lane_idx`` (rl2 bookkeeping)."""
 
+    def observe_batch(
+        self, lane_indices: np.ndarray, rewards: np.ndarray, action_indices: np.ndarray
+    ) -> None:
+        """Vectorized feedback path; subclasses may avoid per-lane overhead."""
+        for lane_idx, reward, action_idx in zip(
+            lane_indices, rewards, action_indices
+        ):
+            self.observe(int(lane_idx), float(reward), int(action_idx))
+
     def reset_lanes(self, done_mask: np.ndarray) -> None:
         """Reset per-lane recurrent state for finished lanes."""
 
     def reset_all(self) -> None:
         """Reset all per-lane state (called on env.reset)."""
+
+    def has_prefetched_actions(self, active: np.ndarray) -> bool:
+        """Whether ``act`` can return without rebuilding observations."""
+        return False
 
 
 class RandomBatchedOpponent(BatchedOpponent):
@@ -79,6 +92,7 @@ class AmagoBatchedOpponent(BatchedOpponent):
         action_dim: int,
         hidden_state=None,
         sample: bool = True,
+        mixed_precision: str = "no",
     ):
         self._driver = AmagoLadderPolicyDriver(
             policy=policy,
@@ -87,6 +101,7 @@ class AmagoBatchedOpponent(BatchedOpponent):
             action_dim=action_dim,
             hidden_state=hidden_state,
             sample=sample,
+            mixed_precision=mixed_precision,
         )
         self.action_dim = int(action_dim)
 
@@ -95,6 +110,11 @@ class AmagoBatchedOpponent(BatchedOpponent):
 
     def observe(self, lane_idx: int, reward: float, action_idx: int) -> None:
         self._driver.observe(lane_idx, reward, action_idx)
+
+    def observe_batch(
+        self, lane_indices: np.ndarray, rewards: np.ndarray, action_indices: np.ndarray
+    ) -> None:
+        self._driver.observe_batch(lane_indices, rewards, action_indices)
 
     def reset_lanes(self, done_mask: np.ndarray) -> None:
         self._driver.reset_lanes(done_mask)
@@ -214,6 +234,11 @@ class ConfigBatchedOpponent(BatchedOpponent):
 
     def observe(self, lane_idx: int, reward: float, action_idx: int) -> None:
         self._require_bundle().observe(lane_idx, reward, action_idx)
+
+    def observe_batch(
+        self, lane_indices: np.ndarray, rewards: np.ndarray, action_indices: np.ndarray
+    ) -> None:
+        self._require_bundle().observe_batch(lane_indices, rewards, action_indices)
 
     def reset_lanes(self, done_mask: np.ndarray) -> None:
         if self._bundle is not None:

@@ -28,12 +28,18 @@ class AmagoLadderPolicyDriver:
         action_dim: int,
         hidden_state=None,
         sample: bool = True,
+        mixed_precision: str = "no",
     ):
         self.policy = policy
         self.device = device
         self.num_lanes = int(num_lanes)
         self.action_dim = int(action_dim)
         self.sample = sample
+        if mixed_precision not in ("no", "bf16", "fp16"):
+            raise ValueError(
+                "mixed_precision must be one of 'no', 'bf16', or 'fp16'"
+            )
+        self.mixed_precision = mixed_precision
         self.rl2s = np.zeros((self.num_lanes, self.action_dim + 1), dtype=np.float32)
         self.step_counts = np.zeros((self.num_lanes,), dtype=np.int64)
         if hidden_state is None:
@@ -76,7 +82,15 @@ class AmagoLadderPolicyDriver:
         time_idxs = (
             torch.from_numpy(self.step_counts).to(self.device).unsqueeze(1).unsqueeze(1)
         )
-        with torch.no_grad():
+        autocast_enabled = self.device.type == "cuda" and self.mixed_precision != "no"
+        autocast_dtype = (
+            torch.bfloat16 if self.mixed_precision == "bf16" else torch.float16
+        )
+        with torch.inference_mode(), torch.autocast(
+            device_type=self.device.type,
+            dtype=autocast_dtype,
+            enabled=autocast_enabled,
+        ):
             act_out, self.hidden_state = self.policy.get_actions(
                 obs=torch_obs,
                 rl2s=rl2s,
@@ -96,6 +110,21 @@ class AmagoLadderPolicyDriver:
         self.rl2s[lane_idx, 0] = float(reward)
         if 0 <= action_idx < self.action_dim:
             self.rl2s[lane_idx, 1 + action_idx] = 1.0
+
+    def observe_batch(
+        self, lane_indices: np.ndarray, rewards: np.ndarray, action_indices: np.ndarray
+    ) -> None:
+        """Record a decision wave without one Python call per active lane."""
+        lanes = np.asarray(lane_indices, dtype=np.int64)
+        if lanes.size == 0:
+            return
+        rewards = np.asarray(rewards, dtype=np.float32)
+        actions = np.asarray(action_indices, dtype=np.int64)
+        self.step_counts[lanes] += 1
+        self.rl2s[lanes] = 0.0
+        self.rl2s[lanes, 0] = rewards
+        valid = (actions >= 0) & (actions < self.action_dim)
+        self.rl2s[lanes[valid], 1 + actions[valid]] = 1.0
 
     def reset_lanes(self, done_mask: np.ndarray) -> None:
         if not done_mask.any():
