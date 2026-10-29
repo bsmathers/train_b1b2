@@ -11,6 +11,22 @@ The collector has two complementary profilers:
   Its absolute throughput is not representative because it substantially slows
   the parser and model, but before/after runs used the same workload.
 
+For a model-independent completed-battle benchmark, use two policies that
+sample uniformly from the live legal-action masks:
+
+```bash
+METAMON_CACHE_DIR=/workspace/b1-data/cache \
+python tools/benchmark_native_random_selfplay.py \
+  --games 500 --lanes 8 --workers 1 \
+  --format gen1ou --team-set competitive --raw-team-files
+```
+
+This runs through the full Ataraxos-facing adapter: both private POV parsers,
+legal masks, shaped reward/feedback state, automatic lane restarts, terminal
+POV checks, and native timing frames are included. It does not include model
+inference or replay compression, so it is the simulator/adapter ceiling rather
+than production collector throughput.
+
 The local comparison used `policy_epoch_51.pt`, four lanes, one native worker,
 eight decisive games, argmax actions, and CPU inference.
 
@@ -125,6 +141,78 @@ occupied 98.6%. After the parser changes, the Python pump boundary was 89.2%
 protocol dispatch/state parsing, 10.4% waiting for native output, and 0.4%
 command sends. The
 collector was therefore parser/adapter-bound, not Zig-simulation-bound.
+
+## Legal-random completed-game benchmark
+
+A dedicated deterministic Gen 1 OU run was added because fixed vector-step
+rates do not account for game length or timeouts. Both players now sample only
+legal actions; the old random opponent sampled across all 13 actions and relied
+on repair, so it was not a true legal-random baseline.
+
+The first 32-lane, two-worker, 250-game run completed at 616.5 games/minute.
+Profiling identified two remaining avoidable conversion layers:
+
+- replay `Move.__deepcopy__` used dynamic slot lookup millions of times per
+  profiled run; its complete eight-slot copy is now direct assignment;
+- native state construction converted replay Pokemon into poke-env Pokemon and
+  immediately converted them again into universal observations. It now routes
+  through the canonical replay-state converter directly. An opt-in verifier
+  (`METAMON_NATIVE_VERIFY_DIRECT_STATE=1`) compared every field with the old
+  route for 60 vector steps without a disagreement.
+
+The direct route also exposed and fixed an independent correctness bug:
+`UniversalPokemon.universal_types` padded a caller's live type list in place.
+It now copies the list before adding the monotype placeholder. Zero/unknown
+maximum HP is handled without division by zero in the replay converter.
+
+The final profiled 500-game run on the local Mac used 8 lanes and one native
+worker:
+
+```text
+completed games:              500
+decisive games:               470
+natural draws / timeouts:     3 / 27
+completed games/minute:       922.7
+decisive games/minute:        867.3
+lane-steps/second:            1,552.5
+```
+
+The identical short workload improved from 616.5 to 690.6 profiled games/minute
+(about 12%) at the original 32-lane setting. A no-profile lane/worker sweep
+reached 944.7 games/minute at 8/1, 834.3 at 16/1, 727.0 at 32/1, 649.7 at 64/2,
+and 637.6 at 64/4. The raw simulator prefers smaller lockstep groups because one
+slow battle stalls the whole group. Neural inference may prefer a larger batch,
+so tune production collection separately. This machine is Python-parser bound;
+adding native workers inside one Python process cannot help.
+
+In the final run, steady Zig `battle.update` consumed 0.020 seconds while the
+native host's adaptation consumed 1.393 seconds. Across the Python pump
+boundary, 93.8% was protocol dispatch/state parsing, 5.2% waiting for host
+output, and 0.9% sending commands. The remaining optimization target is the
+Python replay parser/state adapter; changing the Zig simulator is unlikely to
+move end-to-end throughput materially.
+
+## Feeding an Ataraxos learner
+
+The recommended scaling boundary is a complete decisive trajectory, tagged by
+an immutable behavior-policy hash. Keep each native environment and its two POV
+parsers alive for an entire collection round. The joint policy driver batches
+both physical sides in one GPU forward while retaining independent RL2/KV
+state. Completed games enter a bounded producer queue; writer threads persist
+the exact action, legal mask, behavior log probabilities, behavior value,
+outcome, and policy id without blocking the simulator. The learner consumes
+only a fully validated policy-homogeneous round.
+
+For higher CPU throughput, use several independent 8-lane/one-worker Python
+parser shards feeding one central GPU inference batcher and one bounded
+trajectory queue. The central batcher recovers large GPU batches without
+forcing unrelated battles into one lockstep parser group. Switch behavior
+checkpoints only between games, drain the old policy version before an update,
+and never mix policy hashes in a learner batch. This preserves on-policy ratios
+while parallelizing the parser work that the profile shows is the real
+bottleneck. This multi-process inference service is the next infrastructure
+step; the current collector remains a single process with joint two-side
+inference.
 
 Full validation of a synthetic 2,000-replay round took 4.43 seconds
 sequentially. Python threads made it slower: 2/4/8 workers took 5.00/5.46/5.93

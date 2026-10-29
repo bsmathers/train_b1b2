@@ -263,7 +263,16 @@ class StreamBattleLane:
         cached = self._state_cache.get(side)
         if cached is not None and cached[0] == serial:
             return cached[1]
-        state = UniversalState.from_Battle(self._battles[side])
+        battle = self._battles[side]
+        state = battle.to_universal_state()
+        if os.environ.get("METAMON_NATIVE_VERIFY_DIRECT_STATE") == "1":
+            generic = UniversalState.from_Battle(battle)
+            if state != generic:
+                raise RuntimeError(
+                    f"direct native state disagrees with generic conversion "
+                    f"in lane={self.lane_id} side={side}:\n"
+                    f"direct={state}\ngeneric={generic}"
+                )
         self._state_cache[side] = (serial, state)
         return state
 

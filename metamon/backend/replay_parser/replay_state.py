@@ -145,13 +145,18 @@ class Move(PEMove):
         # scalar assignments and therefore remain independent.
         new = self.__class__.__new__(self.__class__)
         memo[id(self)] = new
-        for slot in PEMove.__slots__:
-            value = getattr(self, slot)
-            # DynamaxMove is a derived lazy cache that may itself refer back to
-            # this instance. Recreate it on demand for the copied move.
-            if slot == "_dynamaxed_move":
-                value = None
-            setattr(new, slot, value)
+        # These are poke-env Move's complete slots. Direct assignment is much
+        # cheaper than eight getattr/setattr calls: this function runs once per
+        # known move per simulated POV per turn. All values are immutable or
+        # scalar except the derived Dynamax cache, which is rebuilt lazily.
+        new._id = self._id
+        new._base_power_override = self._base_power_override
+        new._current_pp = self._current_pp
+        new._dynamaxed_move = None
+        new._gen = self._gen
+        new._is_empty = self._is_empty
+        new._gen_data = self._gen_data
+        new._request_target = self._request_target
         new.__dict__ = self.__dict__.copy()
         return new
 

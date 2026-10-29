@@ -3,9 +3,17 @@ import unittest
 import copy
 
 from metamon.backend.replay_parser.replay_state import Move, Pokemon, Turn
+from metamon.interface import UniversalPokemon
 
 
 class TurnCopyTests(unittest.TestCase):
+    def test_universal_type_padding_does_not_mutate_parser_state(self):
+        live_types = ["Normal"]
+        self.assertEqual(
+            UniversalPokemon.universal_types(live_types), "normal notype"
+        )
+        self.assertEqual(live_types, ["Normal"])
+
     def test_pokemon_deepcopy_preserves_aliases_but_isolates_battle_state(self):
         pokemon = Pokemon("Tauros", lvl=100, gen=1)
         move = Move("Body Slam", gen=1)

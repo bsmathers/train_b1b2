@@ -974,6 +974,11 @@ class VectorizedShowdownEnv(gym.Env):
         terminated = np.zeros((self.batched_envs,), dtype=bool)
         truncated = np.zeros((self.batched_envs,), dtype=bool)
         infos: List[dict] = [{} for _ in range(self.batched_envs)]
+        # Keep terminal outcomes in dedicated arrays.  Besides avoiding sparse
+        # dict work in the hot lane loop, this guarantees that a completed lane
+        # always has both fields even when every value in one field is False.
+        outcome_won: List[Optional[bool]] = [None] * self.batched_envs
+        outcome_draw: List[Optional[bool]] = [None] * self.batched_envs
         eval_actions: List[Optional[int]] = [None] * self.batched_envs
         opp_pending: List[Tuple[int, int, UniversalState]] = []
         acted_lanes: List[int] = []
@@ -1108,11 +1113,11 @@ class VectorizedShowdownEnv(gym.Env):
                                 f"eval_won={new_eval.battle_won}, "
                                 f"opponent_won={opponent_terminal.battle_won}"
                             )
-                    infos[i]["won"] = bool(new_eval.battle_won)
+                    outcome_won[i] = bool(new_eval.battle_won)
                     # The native tournament must distinguish a draw (including
                     # a turn-limit truncation) from a loss. The old 'won' flag
                     # alone reports both as False; capture this before restart.
-                    infos[i]["draw"] = bool(
+                    outcome_draw[i] = bool(
                         truncated[i] or (lane.ended and lane.winner is None)
                     )
                     if self._saving:
@@ -1149,6 +1154,9 @@ class VectorizedShowdownEnv(gym.Env):
             for k, v in info.items():
                 merged_info.setdefault(k, [None] * self.batched_envs)
                 merged_info[k][i] = v
+        if done_mask.any():
+            merged_info["won"] = outcome_won
+            merged_info["draw"] = outcome_draw
         return batched_obs, rewards, terminated, truncated, merged_info
 
     def _save_lane_outcome(self, i: int, final_state: UniversalState) -> None:

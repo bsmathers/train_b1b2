@@ -8,12 +8,13 @@ import poke_env.environment as pe
 import metamon.backend.replay_parser as mrp
 from metamon.backend.replay_parser.replay_state import (
     Pokemon,
+    ReplayState,
     Turn,
     Winner,
     Nothing,
     Move,
 )
-from metamon.interface import UniversalPokemon
+from metamon.interface import UniversalPokemon, UniversalState
 
 
 class MetamonBackendBattle(pe.AbstractBattle):
@@ -64,6 +65,15 @@ class MetamonBackendBattle(pe.AbstractBattle):
         self._force_switch: bool = False
         self._maybe_trapped: bool = False
         self._trapped: bool = False
+        # UniversalState.from_Battle touches active, team, switches, and the
+        # opponent equivalents in one conversion. Those properties repeatedly
+        # ask for the same replay Pokemon. Cache the lightweight poke-env view
+        # for the duration of one parsed state and invalidate on every protocol
+        # or request mutation.
+        self._conversion_serial = 0
+        self._converted_pokemon_cache: Dict[
+            Tuple[int, int, bool], pe.Pokemon
+        ] = {}
 
     @property
     def _current_turn(self) -> Turn:
@@ -74,12 +84,20 @@ class MetamonBackendBattle(pe.AbstractBattle):
         Completely outsource all PS sim protocol messages to built-in
         Metamon replay parser.
         """
-        self._sim_protocol.interpret_message(split_message[1:])
+        try:
+            self._sim_protocol.interpret_message(split_message[1:])
+        finally:
+            # The parser can mutate before rejecting a malformed line; never
+            # retain a converted view across an attempted protocol update.
+            self._conversion_serial += 1
+            self._converted_pokemon_cache.clear()
 
     def parse_request(self, request: Dict[str, Any]):
         """
         Battle boilerplate, then call _update_turn_from_request
         """
+        self._conversion_serial += 1
+        self._converted_pokemon_cache.clear()
         self._wait = request.get("wait", False)
         side = request["side"]
         if side["pokemon"]:
@@ -305,14 +323,82 @@ class MetamonBackendBattle(pe.AbstractBattle):
         self._available_moves = [m for m, disabled in available_moves if not disabled]
 
     def _convert_pokemon(self, pokemon: Pokemon) -> pe.Pokemon:
+        if pokemon is None:
+            return None
         p1 = self.player_role == "p1"
         active = self._current_turn.get_active_pokemon(p1)[0]
         if active is not None:
             is_active = pokemon.unique_id == active.unique_id
         else:
             is_active = False
-        pe_p = UniversalPokemon.metamon_to_poke_env(pokemon, is_active=is_active)
+        key = (self._conversion_serial, id(pokemon), bool(is_active))
+        pe_p = self._converted_pokemon_cache.get(key)
+        if pe_p is None:
+            pe_p = UniversalPokemon.metamon_to_poke_env(
+                pokemon, is_active=is_active
+            )
+            self._converted_pokemon_cache[key] = pe_p
         return pe_p
+
+    def to_universal_state(self) -> UniversalState:
+        """Build the policy state directly from Metamon replay objects.
+
+        The generic ``UniversalState.from_Battle`` route first materializes a
+        complete set of poke-env Pokemon wrappers and immediately translates
+        them back into universal dataclasses. Native simulation already owns
+        the replay-parser objects, so route through the canonical offline
+        ``ReplayState`` converter and avoid that redundant intermediate graph.
+        """
+        p1 = self.player_role == "p1"
+        turn = self._current_turn
+        active = turn.get_active_pokemon(p1)[0]
+        opponent_active = turn.get_active_pokemon(not p1)[0]
+        player_team = [
+            pokemon
+            for pokemon in turn.get_team_dict(p1).values()
+            if pokemon is not None
+        ]
+        if self.reviving:
+            switches = [
+                pokemon
+                for pokemon in player_team
+                if pokemon.status == pe.Status.FNT and pokemon != active
+            ]
+        else:
+            switches = [
+                pokemon
+                for pokemon in player_team
+                if pokemon.status != pe.Status.FNT and pokemon != active
+            ]
+        opponent_team = [
+            pokemon
+            for pokemon in turn.get_team_dict(not p1).values()
+            if pokemon is not None
+        ]
+        preview = [
+            pokemon
+            for pokemon in turn.get_teampreview(not p1)
+            if pokemon is not None
+        ]
+        state = ReplayState(
+            format=self.battle_tag.split("-")[1],
+            force_switch=self.force_switch,
+            active_pokemon=active,
+            opponent_active_pokemon=opponent_active,
+            available_switches=switches,
+            player_prev_move=active.last_used_move,
+            opponent_prev_move=opponent_active.last_used_move,
+            opponent_team=opponent_team,
+            player_conditions=turn.get_conditions(p1),
+            opponent_conditions=turn.get_conditions(not p1),
+            battle_field=turn.battle_field,
+            weather=turn.weather,
+            battle_won=bool(self.won),
+            battle_lost=bool(self.lost),
+            can_tera=self.can_tera is not None,
+            opponent_teampreview=preview,
+        )
+        return UniversalState.from_ReplayState(state)
 
     @property
     def active_pokemon(self) -> Any:

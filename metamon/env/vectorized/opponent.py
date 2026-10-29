@@ -4,8 +4,8 @@ The env synchronizes all lanes at each decision cycle and asks the opponent for
 one action per *active* lane in a single call, so opponent inference is amortized
 across the batch. Two implementations are provided:
 
-  * :class:`RandomBatchedOpponent` — no NN; returns random action indices (the env
-    repairs any illegal pick against the legal mask). Useful for smoke tests.
+  * :class:`RandomBatchedOpponent` — no NN; samples uniformly from each lane's
+    legal actions. Useful for smoke tests and native-engine throughput baselines.
   * :class:`AmagoBatchedOpponent` — wraps a metamon policy via
     :class:`~metamon.env.vectorized.amago_policy.AmagoLadderPolicyDriver`, using
     the same ``rl2`` / ``time_idx`` bookkeeping as ``QueueOnLocalLadder``.
@@ -76,9 +76,18 @@ class RandomBatchedOpponent(BatchedOpponent):
         self.rng = rng or np.random.default_rng()
 
     def act(self, active: np.ndarray, obs_list: List[dict]) -> np.ndarray:
-        return self.rng.integers(0, self.action_dim, size=self.num_lanes).astype(
-            np.int64
-        )
+        actions = np.zeros(self.num_lanes, dtype=np.int64)
+        for lane_idx in np.flatnonzero(active):
+            illegal = np.asarray(
+                obs_list[int(lane_idx)]["illegal_actions"], dtype=bool
+            ).reshape(-1)
+            legal = np.flatnonzero(~illegal)
+            if legal.size == 0:
+                raise RuntimeError(
+                    f"random opponent has no legal action in lane {lane_idx}"
+                )
+            actions[int(lane_idx)] = int(self.rng.choice(legal))
+        return actions
 
 
 class AmagoBatchedOpponent(BatchedOpponent):

@@ -392,6 +392,11 @@ class UniversalPokemon:
 
     @staticmethod
     def universal_types(type_rep: list, force_two: bool = True) -> str:
+        # Callers frequently pass the replay Pokemon's live type list. Padding
+        # that list in place corrupts the simulator/parser state (a monotype
+        # becomes [type, None]) and breaks subsequent conversions. Work on a
+        # shallow copy; entries are immutable enum/string values.
+        type_rep = list(type_rep)
         if force_two:
             while len(type_rep) < 2:
                 type_rep.append(None)
@@ -426,7 +431,11 @@ class UniversalPokemon:
         return cls(
             name=pokemon_name(pokemon.name),
             base_species=pokemon_name(pokemon.had_name),
-            hp_pct=float(pokemon.current_hp) / pokemon.max_hp,
+            hp_pct=(
+                float(pokemon.current_hp) / pokemon.max_hp
+                if pokemon.max_hp
+                else 0.0
+            ),
             types=cls.universal_types(pokemon.type),
             tera_type=cls.universal_types([pokemon.tera_type], force_two=False),
             item=cls.universal_items(pokemon.active_item),

@@ -16,6 +16,7 @@ os.environ.setdefault(
 
 from metamon.rl.ataraxos import JointNativePolicyDriver, NativeBehaviorDriver
 from metamon.rl.ataraxos_replay import load_rollout, validate_buffer
+from metamon.env.vectorized.opponent import RandomBatchedOpponent
 
 
 class _FakeTrajEncoder:
@@ -105,6 +106,22 @@ class AtaraxosReplayTests(unittest.TestCase):
 
 
 class NativeBehaviorDriverTests(unittest.TestCase):
+    def test_random_opponent_samples_only_legal_actions(self):
+        opponent = RandomBatchedOpponent(
+            num_lanes=3, action_dim=4, rng=np.random.default_rng(7)
+        )
+        active = np.asarray([True, False, True])
+        obs = [
+            {"illegal_actions": np.asarray([True, False, True, False])},
+            {"illegal_actions": np.asarray([False, False, False, False])},
+            {"illegal_actions": np.asarray([True, True, False, True])},
+        ]
+        for _ in range(20):
+            actions = opponent.act(active, obs)
+            self.assertIn(int(actions[0]), (1, 3))
+            self.assertEqual(int(actions[1]), 0)
+            self.assertEqual(int(actions[2]), 2)
+
     def test_batched_shapes_legality_and_rl2(self):
         policy = _FakePolicy()
         driver = NativeBehaviorDriver(
