@@ -13,15 +13,25 @@ const { createEngineRequest } = require("./native_request");
  * Implements the exact same binary IPC protocol as battle_host.js:
  *   stdin: JSON-lines commands (start, choose, choose_batch, reset, ping, close)
  *   stdout: binary frames (READY=0, CHUNK=1, HOST_ERROR=2, LANE_ERROR=3,
- *           PONG=4, PROFILE=5)
+ *           PONG=4, PROFILE=5, NATIVE_STATE=6)
  */
 
 const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
 
-const MSG = { READY: 0, CHUNK: 1, HOST_ERROR: 2, LANE_ERROR: 3, PONG: 4, PROFILE: 5 };
+const MSG = {
+  READY: 0,
+  CHUNK: 1,
+  HOST_ERROR: 2,
+  LANE_ERROR: 3,
+  PONG: 4,
+  PROFILE: 5,
+  NATIVE_STATE: 6,
+};
 const STREAM = { p1: 0, p2: 1, error: 2 };
+const BINARY_STATE = process.env.METAMON_NATIVE_BINARY_STATE === "1";
+let nativeFrameBatch = null;
 
 // These counters answer a narrower question than the Python wall profiler:
 // exactly how much synchronous host time is spent inside the native Zig
@@ -64,6 +74,7 @@ function profileAdd(key, started) {
 function emitProfile() {
   const wallNs = process.hrtime.bigint() - profile.startedNs;
   const lines = [
+    `binary_state=${+BINARY_STATE}`,
     `wall_ns=${wallNs}`,
     `json_parse_ns=${profile.jsonParseNs}`,
     `command_handle_ns=${profile.commandHandleNs}`,
@@ -142,6 +153,51 @@ function emitChunk(lane, epoch, streamName, data) {
     profile.frameWriteNs += process.hrtime.bigint() - started;
     profile.chunks += 1;
     profile.payloadBytes += payload.length;
+  }
+}
+
+/**
+ * Emit the native Gen 1 state without converting it to Showdown protocol.
+ *
+ * Payload layout (little endian):
+ *   u8 type, u32 lane, u32 epoch, u8 encoded result,
+ *   u8 p1 choice count, u8 p2 choice count, u16 battle byte length,
+ *   battle bytes, p1 encoded choices, p2 encoded choices.
+ *
+ * The 384-byte battle is the source of truth owned by the Zig engine. Choice
+ * bytes use the engine ABI (low two bits are pass/move/switch; the remaining
+ * bits are the 1-based slot). This removes the JS log/request adapter from the
+ * hot path. The text path remains the default pending observation differential
+ * tests.
+ */
+function emitNativeState(lane, epoch, battle, result, p1Choices, p2Choices) {
+  const started = profileNow();
+  const view = battle.bytes();
+  const battleBytes = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+  const n1 = p1Choices.length;
+  const n2 = p2Choices.length;
+  if (n1 > 255 || n2 > 255 || battleBytes.length > 65535) {
+    throw new Error("native state frame exceeds binary protocol limits");
+  }
+  const headerLength = 14;
+  const frame = Buffer.allocUnsafe(headerLength + battleBytes.length + n1 + n2);
+  frame.writeUInt8(MSG.NATIVE_STATE, 0);
+  frame.writeUInt32LE(lane, 1);
+  frame.writeUInt32LE(epoch, 5);
+  frame.writeUInt8(pkmnEngine.Result.encode(result), 9);
+  frame.writeUInt8(n1, 10);
+  frame.writeUInt8(n2, 11);
+  frame.writeUInt16LE(battleBytes.length, 12);
+  battleBytes.copy(frame, headerLength);
+  let offset = headerLength + battleBytes.length;
+  for (const choice of p1Choices) frame.writeUInt8(pkmnEngine.Choice.encode(choice), offset++);
+  for (const choice of p2Choices) frame.writeUInt8(pkmnEngine.Choice.encode(choice), offset++);
+  if (nativeFrameBatch === null) process.stdout.write(frame);
+  else nativeFrameBatch.push(frame);
+  if (PROFILE) {
+    profile.frameWriteNs += process.hrtime.bigint() - started;
+    profile.chunks += 1;
+    profile.payloadBytes += frame.length - headerLength;
   }
 }
 
@@ -355,19 +411,21 @@ class EngineLane {
         p2: { name: this.playerNames.p2, team: p2Team },
         seed: seed,
         showdown: true,
-        log: true,
+        // Binary state is authoritative and does not need the compact protocol
+        // log. Avoid asking Zig to generate bytes that no consumer reads.
+        log: !BINARY_STATE,
       });
       profileAdd("battleCreateNs", createStarted);
 
       const logSetupStarted = profileNow();
-      this.logParser = new Log(
-        gen1,
-        Lookup.get(gen1),
-        new Info(gen1, {
-          p1: { name: this.playerNames.p1, team: p1Team },
-          p2: { name: this.playerNames.p2, team: p2Team },
-        })
-      );
+      this.logParser = BINARY_STATE ? null : new Log(
+          gen1,
+          Lookup.get(gen1),
+          new Info(gen1, {
+            p1: { name: this.playerNames.p1, team: p1Team },
+            p2: { name: this.playerNames.p2, team: p2Team },
+          })
+        );
       profileAdd("logSetupNs", logSetupStarted);
 
       const updateStarted = profileNow();
@@ -389,6 +447,14 @@ class EngineLane {
   _emitTurn(res) {
     const emitStarted = profileNow();
     try {
+      if (BINARY_STATE) {
+        const p1Choices = this.battle.choices("p1", res) || [];
+        const p2Choices = this.battle.choices("p2", res) || [];
+        emitNativeState(
+          this.id, this.epoch, this.battle, res, p1Choices, p2Choices
+        );
+        return;
+      }
       // The engine Result is authoritative and is always from p1's
       // perspective.  Do not infer the winner from Side fields: @pkmn/engine
       // Side objects have no `fainted` property, so that inference appended a
@@ -498,6 +564,24 @@ class EngineLane {
     }
   }
 
+  stepEncoded(c1, c2, epoch) {
+    if (!BINARY_STATE) throw new Error("encoded choices require binary state mode");
+    if (!this.battle || (epoch !== undefined && epoch !== this.epoch)) return;
+    try {
+      if (PROFILE) profile.steps += 1;
+      const updateStarted = profileNow();
+      const res = this.battle.update(
+        pkmnEngine.Choice.decode(Number(c1)),
+        pkmnEngine.Choice.decode(Number(c2))
+      );
+      profileAdd("engineUpdateNs", updateStarted);
+      this.lastResult = res;
+      this._emitTurn(res);
+    } catch (err) {
+      emitLaneError(this.id, this.epoch, `Engine encoded step error: ${err.message}`);
+    }
+  }
+
   destroy() {
     this.battle = null;
     this.logParser = null;
@@ -553,6 +637,17 @@ function handleCommand(msg) {
         const lane = lanes.get(c.lane);
         if (lane) lane.choose(c.side, c.choice, c.epoch);
       }
+      break;
+    }
+    case "choose_native_batch": {
+      const frames = [];
+      nativeFrameBatch = frames;
+      for (const c of msg.choices || []) {
+        const lane = lanes.get(c[0]);
+        if (lane) lane.stepEncoded(c[2], c[3], c[1]);
+      }
+      nativeFrameBatch = null;
+      if (frames.length) process.stdout.write(Buffer.concat(frames));
       break;
     }
     case "reset": {

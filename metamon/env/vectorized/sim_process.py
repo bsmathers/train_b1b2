@@ -36,12 +36,14 @@ MSG_HOST_ERROR = 2
 MSG_LANE_ERROR = 3
 MSG_PONG = 4
 MSG_PROFILE = 5
+MSG_NATIVE_STATE = 6
 
 _STREAM_BY_ID = ("p1", "p2", "error")
 _CHUNK_BODY = struct.Struct("<BIIBI")  # type, lane, epoch, stream_id, data_len
 _HOST_ERROR_BODY = struct.Struct("<BI")  # type, data_len
 _LANE_ERROR_BODY = struct.Struct("<BIII")  # type, lane, epoch, data_len
 _PROFILE_BODY = struct.Struct("<BI")  # type, data_len
+_NATIVE_STATE_BODY = struct.Struct("<BIIBBBH")
 
 
 def _parse_profile_payload(payload: str) -> Dict[str, int]:
@@ -57,6 +59,14 @@ class LaneHandler(Protocol):
     """Anything that can consume a host chunk for a single lane."""
 
     def handle_chunk(self, stream: str, data: str) -> None: ...
+
+    def handle_native_state(
+        self,
+        battle: bytes,
+        result: int,
+        p1_choices: bytes,
+        p2_choices: bytes,
+    ) -> None: ...
 
 
 class ShowdownSimProcessError(RuntimeError):
@@ -176,6 +186,27 @@ class ShowdownSimProcess:
                         "epoch": epoch,
                         "stream": stream,
                         "data": data_b.decode("utf-8"),
+                    }
+                )
+                continue
+            if msg_type == MSG_NATIVE_STATE:
+                body = self._read_exact(_NATIVE_STATE_BODY.size - 1)
+                if body is None:
+                    break
+                _, lane, epoch, result, n1, n2, battle_len = (
+                    _NATIVE_STATE_BODY.unpack(type_b + body)
+                )
+                payload = self._read_exact(battle_len + n1 + n2)
+                if payload is None:
+                    break
+                self._inbox.put(
+                    {
+                        "lane": lane,
+                        "epoch": epoch,
+                        "native_state": payload[:battle_len],
+                        "result": result,
+                        "p1_choices": payload[battle_len : battle_len + n1],
+                        "p2_choices": payload[battle_len + n1 :],
                     }
                 )
                 continue
@@ -323,6 +354,23 @@ class ShowdownSimProcess:
         ]
         self._send({"cmd": "choose_batch", "choices": choices})
 
+    def choose_native_batch(self, entries: List[Tuple[int, int, int]]) -> None:
+        """Advance binary-state lanes with engine-encoded p1/p2 choices."""
+        if not entries:
+            return
+        # Positional rows keep this hot command small and cheap to parse:
+        # [lane, epoch, encoded-p1-choice, encoded-p2-choice].
+        choices = [
+            [
+                int(lane),
+                self._epoch.get(int(lane), 0),
+                int(p1),
+                int(p2),
+            ]
+            for lane, p1, p2 in entries
+        ]
+        self._send({"cmd": "choose_native_batch", "choices": choices})
+
     def reset(self, lane: int) -> None:
         self._send({"cmd": "reset", "lane": int(lane)})
 
@@ -353,7 +401,22 @@ class ShowdownSimProcess:
             return
         handler = self._handlers.get(int(lane_id))
         if handler is not None:
-            handler.handle_chunk(stream, data)
+            native_state = msg.get("native_state")
+            if native_state is not None:
+                native_handler = getattr(handler, "handle_native_state", None)
+                if native_handler is None:
+                    raise ShowdownSimProcessError(
+                        f"lane {lane_id} received native binary state without "
+                        "a native handler"
+                    )
+                native_handler(
+                    native_state,
+                    int(msg["result"]),
+                    msg["p1_choices"],
+                    msg["p2_choices"],
+                )
+            else:
+                handler.handle_chunk(stream, data)
 
     def pump_until(
         self,
@@ -448,16 +511,21 @@ class ShowdownSimProcess:
         dispatch = self._profile_stats.get("dispatch_seconds", 0.0)
         send = self._profile_stats.get("send_seconds", 0.0)
         pump = wait + dispatch + send
+        adapter_name = (
+            "binary framing/commands outside Zig"
+            if host.get("binary_state", 0)
+            else "Node text adaptation outside Zig"
+        )
         lines = [
             "native boundary profile (single host):",
             f"  Zig battle.update: {zig:.3f}s "
             f"({100.0 * zig / max(host_active, 1e-9):.1f}% of host active time)",
-            f"  Node adaptation outside Zig: {adapter:.3f}s "
+            f"  {adapter_name}: {adapter:.3f}s "
             f"({100.0 * adapter / max(host_active, 1e-9):.1f}% of host active time)",
             f"  Node battle startup (inclusive): {startup:.3f}s",
             f"  Steady Zig turns: {steady_zig:.3f}s "
             f"({100.0 * steady_zig / max(steady_active, 1e-9):.1f}% of steady host time)",
-            f"  Steady Node adaptation: {steady_adapter:.3f}s "
+            f"  Steady {adapter_name}: {steady_adapter:.3f}s "
             f"({100.0 * steady_adapter / max(steady_active, 1e-9):.1f}% of steady host time)",
             f"  Python waiting for host output: {wait:.3f}s "
             f"({100.0 * wait / max(pump, 1e-9):.1f}% of pump boundary)",
@@ -668,6 +736,16 @@ class ShardedShowdownSimProcess:
         for worker_id, batch in by_worker.items():
             self._workers[worker_id].choose_batch(batch)
 
+    def choose_native_batch(self, entries: List[Tuple[int, int, int]]) -> None:
+        if not entries:
+            return
+        by_worker: Dict[int, List[Tuple[int, int, int]]] = {}
+        for lane, p1, p2 in entries:
+            worker_id, local_lane = self._local_lane(int(lane))
+            by_worker.setdefault(worker_id, []).append((local_lane, p1, p2))
+        for worker_id, batch in by_worker.items():
+            self._workers[worker_id].choose_native_batch(batch)
+
     def reset(self, lane: int) -> None:
         worker_id, local_lane = self._local_lane(int(lane))
         self._workers[worker_id].reset(local_lane)
@@ -699,7 +777,22 @@ class ShardedShowdownSimProcess:
             return
         handler = self._handlers.get(int(lane_id))
         if handler is not None:
-            handler.handle_chunk(stream, data)
+            native_state = msg.get("native_state")
+            if native_state is not None:
+                native_handler = getattr(handler, "handle_native_state", None)
+                if native_handler is None:
+                    raise ShowdownSimProcessError(
+                        f"lane {lane_id} received native binary state without "
+                        "a native handler"
+                    )
+                native_handler(
+                    native_state,
+                    int(msg["result"]),
+                    msg["p1_choices"],
+                    msg["p2_choices"],
+                )
+            else:
+                handler.handle_chunk(stream, data)
 
     def pump_until(
         self,

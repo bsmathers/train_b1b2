@@ -259,3 +259,23 @@ sequentially. Python threads made it slower: 2/4/8 workers took 5.00/5.46/5.93
 seconds. Validation therefore remains sequential by default. It is a round
 boundary cost, not a simulator-thread cost, and the strict full pass is retained
 for correctness.
+# Binary native-state path
+
+The text compatibility adapter is no longer the performance ceiling. Setting
+`METAMON_NATIVE_BINARY_STATE=1` makes the host emit one binary frame containing
+the Zig engine's 384-byte Gen 1 battle state, encoded result, and legal native
+choices for both players. It skips Showdown log decoding, request construction,
+duplicated POV text, JSON request serialization, UTF-8 decoding, and replay
+parser updates.
+
+`tools/benchmark_native_binary_selfplay.py` exercises this lossless simulator
+trajectory boundary. On the development machine, 10,000 random-vs-random games
+at 64 lanes completed at about 158,000 games/minute and 274,000 lane-steps/sec
+with one host. Four hosts were slower (about 101,000 games/minute) because relay
+threads and extra command serialization outweighed simulator parallelism.
+
+This path currently collects native state/action/outcome trajectories; it is
+not yet the default model-facing environment. The remaining required step is a
+differentially tested direct decoder from the binary state plus per-POV reveal
+history into the exact GroupedObservationSpace tensors. Until that decoder is
+verified, normal training continues to use the text adapter.
