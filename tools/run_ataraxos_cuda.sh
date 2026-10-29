@@ -24,6 +24,10 @@ DEVICE="${DEVICE:-cuda:0}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 PROFILE="${PROFILE:-0}"
 JOINT_INFERENCE="${JOINT_INFERENCE:-1}"
+TURN_LIMIT="${TURN_LIMIT:-200}"
+SEED="${SEED:-20261027}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-20}"
+MAX_VECTOR_STEPS="${MAX_VECTOR_STEPS:-1000000}"
 
 if [ ! -x "${PYTHON_BIN}" ] && ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "ERROR: Python executable not found: ${PYTHON_BIN}" >&2
@@ -48,6 +52,10 @@ echo "  Output: ${OUTPUT_DIR}"
 echo "  Round: ${ROUND}; rounds: ${ROUNDS}; decisive games per round: ${GAMES}"
 echo "  Collector: ${LANES} lanes, ${SIM_WORKERS} simulator workers, ${WRITER_WORKERS} writer workers"
 echo "  Device: ${DEVICE}; mixed precision: ${MIXED_PRECISION}"
+echo "  Host logical CPUs: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+fi
 
 COMMAND=(
     "${PYTHON_BIN}" -m metamon.rl.ataraxos
@@ -64,6 +72,10 @@ COMMAND=(
     --team-set "${TEAM_SET}"
     --side "${SIDE}"
     --temperature "${TEMPERATURE}"
+    --turn-limit "${TURN_LIMIT}"
+    --seed "${SEED}"
+    --progress-interval "${PROGRESS_INTERVAL}"
+    --max-vector-steps "${MAX_VECTOR_STEPS}"
     --device "${DEVICE}"
     --mixed-precision "${MIXED_PRECISION}"
 )

@@ -22,6 +22,7 @@ import argparse
 import copy
 import hashlib
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -696,6 +697,11 @@ def collect_round(
     timed("replay_validation", tick)
     elapsed = time.monotonic() - started
     collected_games = int(summary["games"]) - existing_games
+    device_name = (
+        torch.cuda.get_device_name(device)
+        if device.type == "cuda"
+        else platform.processor() or platform.machine()
+    )
     fields = {
         "round": round_index,
         "behavior_policy_id": policy_id,
@@ -708,6 +714,17 @@ def collect_round(
         "vector_steps": vector_steps,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * collected_games / max(elapsed, 1e-6):.3f}",
+        "decisions_per_second": f"{int(summary['steps']) / max(elapsed, 1e-6):.3f}",
+        "vector_steps_per_second": f"{vector_steps / max(elapsed, 1e-6):.3f}",
+        "evaluated_policy_seconds": f"{profile.get('evaluated_policy', 0.0):.3f}",
+        "environment_step_seconds": f"{profile.get('environment_step', 0.0):.3f}",
+        "device": device,
+        "device_name": device_name,
+        "host_logical_cpus": os.cpu_count() or 0,
+        "lanes": args.lanes,
+        "simulator_workers": args.workers,
+        "writer_workers": args.writer_workers,
+        "joint_inference": args.joint_inference,
         "engine": "native-zig-pkmn",
         "update_status": "pending",
     }

@@ -86,6 +86,21 @@ writer flush:                  0.000 s
 This run reached 78.2 games/minute locally. That number is only a regression
 benchmark, not a CUDA throughput prediction.
 
+The complete repeatable benchmark (model-facing adapter, lossless binary
+boundary, and optionally a real checkpoint) is available as:
+
+```bash
+METAMON_CACHE_DIR=/workspace/b1-data/cache \
+PYTHON_BIN=/workspace/b1-venv/bin/python \
+CHECKPOINT=/workspace/b1-data/checkpoints/stage1_b1_epoch51_selected_actor/ckpts/policy_weights/policy_actor_bc_final.pt \
+DEVICE=cuda:0 MIXED_PRECISION=bf16 \
+./tools/benchmark_ataraxos_local.sh
+```
+
+Every real-policy round records games/minute, decisions/second,
+vector-steps/second, policy and environment seconds, device identity, CPU
+count, and collector widths in its human-readable `round-summary.txt`.
+
 The two physical players originally used separate policy calls. A joint driver
 now concatenates both player batches, retains separate RL2 and KV-cache slices,
 and returns evaluated actions/metadata plus opponent actions in one packed
@@ -303,3 +318,22 @@ The result vector was 258 p1 wins, 237 p2 wins, five natural ties, and no
 The binary path still stops at a lossless raw native trajectory. It does not
 yet have a binary-to-`UniversalState` model observation decoder, so this test
 does not claim equality for that not-yet-implemented representation.
+
+## 2026-10-29 local reference
+
+The current Mac reference used the `b1_good_807` distribution, 64 lanes and
+four native hosts. The full model-facing legal-random adapter completed 2,000
+games in 97.96 seconds: 1,225.0 completed games/minute and 1,831 lane-steps/s.
+Steady Zig execution was 1.4% of native-host active time. Node adaptation was
+98.6%, and Python protocol dispatch/state parsing was 88.5% of the pump
+boundary.
+
+The lossless binary boundary completed 10,000 games in 5.81 seconds: 103,199
+games/minute and 157,951 lane-steps/s. This is the simulator/transport ceiling,
+not current model-facing throughput.
+
+A real 27.23M-parameter epoch-51 policy smoke run on CPU collected and fully
+validated 16 decisive games and 1,092 decisions. It reached 18.44 games/minute;
+56.7% of measured time was policy inference and 40.8% was the environment.
+This CPU result verifies the complete collection contract but is not a useful
+CUDA speed prediction. The CUDA host should be measured with the same script.
