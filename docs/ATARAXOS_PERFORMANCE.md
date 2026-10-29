@@ -279,3 +279,27 @@ not yet the default model-facing environment. The remaining required step is a
 differentially tested direct decoder from the binary state plus per-POV reveal
 history into the exact GroupedObservationSpace tensors. Until that decoder is
 verified, normal training continues to use the text adapter.
+
+### Seeded legacy/binary differential
+
+`tools/differential_native_adapters.py` builds one immutable manifest with a
+team pair, four-word engine seed, and independent seeded PRNG for each player
+for every game. It runs the binary transport, a legacy text run with native
+frames mirrored from the same engine update, a replay-data recheck, and an
+uninstrumented legacy timing run. Any difference in the 384-byte engine state,
+native legal choices, chosen actions, terminal result, or repeated legacy
+`UniversalState` replay record stops at the first game and state.
+
+The 500-game reference run on 2026-10-29 used 32 lanes, one host worker, and
+master seed 20261029. It passed with native trajectory SHA-256
+`efdc09dcf1e770edc5c1d8d5c18e752a14c3aefe2b6c3325907a56e0ca18f6f9`
+and legacy parsed replay SHA-256
+`d9cd3842373007b168b0545fdfbf5e695a16b5866f515d8d2305dde46e68c3c7`.
+The result vector was 258 p1 wins, 237 p2 wins, five natural ties, and no
+500-decision timeouts. On the local machine the binary transport took 0.393s
+(76,239 games/min) and uninstrumented legacy text transport took 4.816s
+(6,229 games/min), a 12.24x transport-boundary speedup.
+
+The binary path still stops at a lossless raw native trajectory. It does not
+yet have a binary-to-`UniversalState` model observation decoder, so this test
+does not claim equality for that not-yet-implemented representation.

@@ -12,6 +12,13 @@ Updated: 2026-10-27
   [`docs/MODEL_TRAINING_HISTORY.md`](docs/MODEL_TRAINING_HISTORY.md).
 - `testing4_work` is an older, separate Snorlax experiment. Do not treat it as
   this repository or copy its full training loop back wholesale.
+- `tools/differential_native_adapters.py` now performs a seeded legacy/binary
+  adapter differential. The 500-game reference run (seed 20261029, 32 lanes,
+  one host) matched every native engine byte, legal-choice vector, action,
+  result, and repeated legacy replay record: 258 p1 wins, 237 p2 wins, five
+  ties, and no 500-decision timeouts. Binary transport was 12.24x faster at
+  this boundary (76,239 vs 6,229 games/min). The binary-to-model observation
+  decoder remains unimplemented; do not claim model-facing equivalence yet.
 
 At the time this handoff was written, the checkout also contained unfinished,
 uncommitted Ataraxos infrastructure work:

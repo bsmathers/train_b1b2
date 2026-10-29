@@ -31,6 +31,13 @@ const MSG = {
 };
 const STREAM = { p1: 0, p2: 1, error: 2 };
 const BINARY_STATE = process.env.METAMON_NATIVE_BINARY_STATE === "1";
+// Differential-test mode emits the authoritative native frame immediately
+// before the legacy text frames for the *same* engine update.  Production
+// collection never enables this: it exists solely to prove that a separately
+// executed binary run saw identical engine bytes, choices, and results.
+const BINARY_MIRROR = process.env.METAMON_NATIVE_BINARY_MIRROR === "1";
+const ENCODED_CHOICES =
+  BINARY_STATE || process.env.METAMON_NATIVE_ENCODED_CHOICES === "1";
 let nativeFrameBatch = null;
 
 // These counters answer a narrower question than the Python wall profiler:
@@ -447,13 +454,13 @@ class EngineLane {
   _emitTurn(res) {
     const emitStarted = profileNow();
     try {
-      if (BINARY_STATE) {
+      if (BINARY_STATE || BINARY_MIRROR) {
         const p1Choices = this.battle.choices("p1", res) || [];
         const p2Choices = this.battle.choices("p2", res) || [];
         emitNativeState(
           this.id, this.epoch, this.battle, res, p1Choices, p2Choices
         );
-        return;
+        if (BINARY_STATE) return;
       }
       // The engine Result is authoritative and is always from p1's
       // perspective.  Do not infer the winner from Side fields: @pkmn/engine
@@ -565,7 +572,9 @@ class EngineLane {
   }
 
   stepEncoded(c1, c2, epoch) {
-    if (!BINARY_STATE) throw new Error("encoded choices require binary state mode");
+    if (!ENCODED_CHOICES) {
+      throw new Error("encoded choices require binary or differential-test mode");
+    }
     if (!this.battle || (epoch !== undefined && epoch !== this.epoch)) return;
     try {
       if (PROFILE) profile.steps += 1;
