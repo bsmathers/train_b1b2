@@ -205,6 +205,8 @@ The online observation path also now:
 
 - caches immutable cleaned move metadata while copying live PP into snapshots;
 - caches Pokemon and move snapshots by all observation-visible mutable fields;
+- maps each stable private-request `ident` to its live replay Pokemon once per
+  battle instead of reparsing six identities at every decision;
 - derives the 13-way legal mask directly from the private simulator request;
 - translates an action directly to a Showdown choice from the universal state
   and request, avoiding a replay-Pokemon -> poke-env-Pokemon -> BattleOrder

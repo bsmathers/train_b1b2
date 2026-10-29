@@ -43,6 +43,7 @@ class MetamonBackendBattle(pe.AbstractBattle):
         self._logger = logger
         self._save_replays = save_replays
         self._gen = gen
+        self._retain_turn_history = bool(retain_turn_history)
         self._mm_battle = mrp.replay_state.ParsedReplay(
             gameid=battle_tag, time_played=datetime.now(), gen=gen
         )
@@ -77,6 +78,12 @@ class MetamonBackendBattle(pe.AbstractBattle):
         self._converted_pokemon_cache: Dict[
             Tuple[int, int, bool], pe.Pokemon
         ] = {}
+        # A private request repeats all six stable `ident` strings at every
+        # decision. Historyless native battles retain the same replay Pokemon
+        # objects, so avoid reparsing details and scanning the roster for each
+        # of those entries. Retained-history battles deliberately keep the old
+        # lookup path because their Pokemon objects are copied every turn.
+        self._request_pokemon_cache: Dict[str, Pokemon] = {}
 
     @property
     def _current_turn(self) -> Turn:
@@ -245,9 +252,18 @@ class MetamonBackendBattle(pe.AbstractBattle):
                 if not poke:
                     continue
                 details = poke["details"]
-                metamon_p = self._sim_protocol.get_or_create_pokemon_from_details(
-                    details=details, poke_list=turn.get_pokemon(p1)
+                ident = str(poke.get("ident", ""))
+                metamon_p = (
+                    self._request_pokemon_cache.get(ident)
+                    if not self._retain_turn_history and ident
+                    else None
                 )
+                if metamon_p is None:
+                    metamon_p = self._sim_protocol.get_or_create_pokemon_from_details(
+                        details=details, poke_list=turn.get_pokemon(p1)
+                    )
+                    if not self._retain_turn_history and ident:
+                        self._request_pokemon_cache[ident] = metamon_p
                 self._update_pokemon_from_side_request(poke, metamon_p)
                 # build available_switches
                 if poke["active"]:
