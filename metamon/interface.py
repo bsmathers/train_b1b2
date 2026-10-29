@@ -245,12 +245,37 @@ class UniversalMove:
         )
 
     @classmethod
-    def from_ReplayMove(cls, move: Optional[ReplayMove]):
-        universal_move = cls.from_Move(move)
-        if move is not None:
-            universal_move.current_pp = move.pp
-            universal_move.max_pp = move.maximum_pp
-        return universal_move
+    def from_ReplayMove(
+        cls, move: Optional[ReplayMove], *, use_snapshot_cache: bool = False
+    ):
+        if move is None:
+            return cls.blank_move()
+        assert isinstance(move, ReplayMove)
+        # Replay Move metadata is immutable. The in-place online parser keeps
+        # these objects alive for the whole battle, so cleaning the same names
+        # and consulting the same dex-backed properties on every observation
+        # was a substantial fraction of Python adapter time. PP remains live
+        # and is copied into every immutable UniversalMove snapshot.
+        static = move._universal_static
+        if static is None:
+            static = (
+                move_name(move.id),
+                clean_name(move.type.name),
+                clean_name(move.category.name),
+                move.base_power,
+                move.accuracy,
+                move.priority,
+            )
+            move._universal_static = static
+        pp_key = (move.pp, move.maximum_pp)
+        if use_snapshot_cache:
+            cached = move._universal_snapshot
+            if cached is not None and cached[0] == pp_key:
+                return cached[1]
+        universal = cls(*static, *pp_key)
+        if use_snapshot_cache:
+            move._universal_snapshot = (pp_key, universal)
+        return universal
 
     @classmethod
     def from_Move(cls, move: Optional[Move]):
@@ -411,24 +436,56 @@ class UniversalPokemon:
         return " ".join(sorted(type_strs))
 
     @classmethod
-    def from_ReplayPokemon(cls, pokemon: ReplayPokemon):
+    def from_ReplayPokemon(
+        cls, pokemon: ReplayPokemon, *, use_snapshot_cache: bool = False
+    ):
         assert isinstance(pokemon, ReplayPokemon)
+        moves_source = [
+            move for move in pokemon.moves.values() if move is not None
+        ][:4]
+        if use_snapshot_cache:
+            boosts_obj = pokemon.boosts
+            cache_key = (
+                pokemon.name,
+                pokemon.had_name,
+                pokemon.current_hp,
+                pokemon.max_hp,
+                tuple(pokemon.type or ()),
+                pokemon.tera_type,
+                pokemon.active_item,
+                pokemon.active_ability,
+                pokemon.lvl,
+                pokemon.status,
+                tuple(pokemon.effects.items()),
+                tuple((id(move), move.pp, move.maximum_pp) for move in moves_source),
+                boosts_obj.atk_,
+                boosts_obj.spa_,
+                boosts_obj.def_,
+                boosts_obj.spd_,
+                boosts_obj.spe_,
+                boosts_obj.accuracy_,
+                boosts_obj.evasion_,
+                tuple(pokemon.base_stats.get(stat) for stat in ("atk", "spa", "def", "spd", "spe", "hp")),
+                tuple(pokemon.computed_stats.get(stat) for stat in ("hp", "atk", "def", "spa", "spd", "spe")),
+            )
+            cached = getattr(pokemon, "_universal_snapshot_cache", None)
+            if cached is not None and cached[0] == cache_key:
+                return cached[1]
         # NOTE: new replay parser lets movesets go over 4 for some dittos... so temporary fix here
         moves = [
-            UniversalMove.from_ReplayMove(move)
-            for move in pokemon.moves.values()
-            if move is not None
-        ][:4]
-        stats = {f"base_{stat}": val for stat, val in pokemon.base_stats.items()}
-        boosts = {
-            f"{stat}boost": getattr(pokemon.boosts, stat)
-            for stat in pokemon.boosts.stat_attrs
-        }
+            UniversalMove.from_ReplayMove(
+                move, use_snapshot_cache=use_snapshot_cache
+            )
+            for move in moves_source
+        ]
         if pokemon.effects:
             most_recent_effect = min(pokemon.effects.keys(), key=pokemon.effects.get)
         else:
             most_recent_effect = None
-        return cls(
+        boosts = pokemon.boosts
+        base = pokemon.base_stats
+        computed = pokemon.computed_stats
+        universal = cls(
             name=pokemon_name(pokemon.name),
             base_species=pokemon_name(pokemon.had_name),
             hp_pct=(
@@ -444,8 +501,29 @@ class UniversalPokemon:
             status=cls.universal_status(pokemon.status),
             effect=cls.universal_effects(most_recent_effect),
             moves=moves,
-            **(boosts | stats | cls._stat_fields(pokemon.computed_stats)),
+            atk_boost=boosts.atk_,
+            spa_boost=boosts.spa_,
+            def_boost=boosts.def_,
+            spd_boost=boosts.spd_,
+            spe_boost=boosts.spe_,
+            accuracy_boost=boosts.accuracy_,
+            evasion_boost=boosts.evasion_,
+            base_atk=base.get("atk", -1),
+            base_spa=base.get("spa", -1),
+            base_def=base.get("def", -1),
+            base_spd=base.get("spd", -1),
+            base_spe=base.get("spe", -1),
+            base_hp=base.get("hp", -1),
+            hp_stat=computed.get("hp", -1) or -1,
+            atk_stat=computed.get("atk", -1) or -1,
+            def_stat=computed.get("def", -1) or -1,
+            spa_stat=computed.get("spa", -1) or -1,
+            spd_stat=computed.get("spd", -1) or -1,
+            spe_stat=computed.get("spe", -1) or -1,
         )
+        if use_snapshot_cache:
+            pokemon._universal_snapshot_cache = (cache_key, universal)
+        return universal
 
     @classmethod
     def from_Pokemon(cls, pokemon: Pokemon):
@@ -592,12 +670,23 @@ class UniversalState:
 
     # fmt: off
     @classmethod
-    def from_ReplayState(cls, state: ReplayState):
+    def from_ReplayState(
+        cls, state: ReplayState, *, use_pokemon_snapshot_cache: bool = False
+    ):
         assert isinstance(state, ReplayState)
         format = re.sub(r"\[|\]| ", "", state.format).lower()
-        active = UniversalPokemon.from_ReplayPokemon(state.active_pokemon)
-        opponent = UniversalPokemon.from_ReplayPokemon(state.opponent_active_pokemon)
-        switches = [UniversalPokemon.from_ReplayPokemon(p) for p in state.available_switches]
+        active = UniversalPokemon.from_ReplayPokemon(
+            state.active_pokemon, use_snapshot_cache=use_pokemon_snapshot_cache
+        )
+        opponent = UniversalPokemon.from_ReplayPokemon(
+            state.opponent_active_pokemon, use_snapshot_cache=use_pokemon_snapshot_cache
+        )
+        switches = [
+            UniversalPokemon.from_ReplayPokemon(
+                p, use_snapshot_cache=use_pokemon_snapshot_cache
+            )
+            for p in state.available_switches
+        ]
         opponents_remaining = 6 - sum(p.status == Status.FNT for p in state.opponent_team if p is not None)
         opponent_teampreview = [pokemon_name(p.had_name) for p in state.opponent_teampreview]
         return cls(

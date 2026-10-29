@@ -12,6 +12,7 @@ from metamon.backend.replay_parser.replay_state import (
     Winner,
     TargetedBy,
     Targeting,
+    Turn,
     Replacement,
     ParsedReplay,
 )
@@ -211,8 +212,25 @@ class SimProtocol:
         "Poison Puppeteer",
     }
 
-    def __init__(self, replay: ParsedReplay):
+    def __init__(self, replay: ParsedReplay, retain_turn_history: bool = True):
         self.replay = replay
+        self.retain_turn_history = bool(retain_turn_history)
+
+    def _subturn_snapshot(self, force_switch: bool) -> Turn:
+        """Freeze a subturn offline; use a cheap marker in online mode.
+
+        Backward replay reconstruction consumes complete mid-turn snapshots.
+        Native self-play only needs ``Subturn.unfilled`` to become false while
+        processing a forced switch; its live decision state comes from the
+        simulator request. Avoid deep-copying the entire battle for a snapshot
+        that the online path discards at the next turn boundary.
+        """
+        if self.retain_turn_history:
+            return self.curr_turn.create_subturn(force_switch)
+        return Turn(
+            turn_number=self.curr_turn.turn_number,
+            is_force_switch=force_switch,
+        )
 
     @property
     def curr_turn(self):
@@ -272,10 +290,17 @@ class SimProtocol:
         |turn|NUMBER
         """
         assert self.curr_turn.turn_number is not None
-        new_turn = self.curr_turn.create_next_turn()
-        # saves the within-turn-state for the previous turn, but does not continue it
-        new_turn.on_end_of_turn()
-        self.replay.turnlist.append(new_turn)
+        if self.retain_turn_history:
+            new_turn = self.curr_turn.create_next_turn()
+            # saves the within-turn-state for the previous turn, but does not continue it
+            new_turn.on_end_of_turn()
+            self.replay.turnlist.append(new_turn)
+        else:
+            if len(self.replay.turnlist) != 1:
+                raise RuntimeError(
+                    "historyless protocol parser unexpectedly retained old turns"
+                )
+            self.curr_turn.advance_in_place()
 
     def _parse_win(self, args: List[str]):
         """
@@ -396,7 +421,7 @@ class SimProtocol:
                 is_force_switch = True
                 player_subturn = subturn
             if subturn.unfilled:
-                subturn.fill_turn(self.curr_turn.create_subturn(True))
+                subturn.fill_turn(self._subturn_snapshot(True))
 
         # id switch out
         poke_list = self.curr_turn.get_pokemon_list_from_str(args[0])
@@ -630,7 +655,7 @@ class SimProtocol:
                     for subturn in self.curr_turn.subturns:
                         if subturn.matches_slot(switch_team, switch_slot):
                             if subturn.unfilled:
-                                subturn.fill_turn(self.curr_turn.create_subturn(True))
+                                subturn.fill_turn(self._subturn_snapshot(True))
                             # hardcoded action type that gets converted to similar action idices to "switch"
                             subturn.action = Action(
                                 name="$Forced Revival$",

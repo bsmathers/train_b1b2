@@ -15,7 +15,13 @@ from typing import Optional
 from poke_env.environment import Battle
 from poke_env.player.battle_order import BattleOrder
 
-from metamon.interface import UniversalAction
+from metamon.backend.replay_parser.str_parsing import move_name, pokemon_name
+from metamon.interface import (
+    UniversalAction,
+    UniversalState,
+    consistent_move_order,
+    consistent_pokemon_order,
+)
 
 
 CHOOSE_PREFIX = "/choose "
@@ -34,6 +40,67 @@ def battle_order_to_choice(message: str) -> str:
         # e.g. "/forfeit" — pass through without the leading slash.
         return message[1:]
     return message
+
+
+def action_idx_to_native_choice(
+    action_idx: int, state: UniversalState, request: Optional[dict] = None
+) -> Optional[str]:
+    """Translate the fixed native action space straight from state + request.
+
+    The generic path converts every replay Pokemon to a poke-env Pokemon, builds
+    a BattleOrder, and then converts it back to a Showdown choice string. The
+    live request already supplies the exact enabled move ids and party slots,
+    so the Gen 1 native collector can preserve the same stable action ordering
+    without that intermediate object graph.
+    """
+    request = request or {}
+    active = request.get("active") or []
+    request_moves = active[0].get("moves") or [] if active else []
+    idx = int(action_idx)
+    wants_tera = idx >= 9
+    if wants_tera:
+        idx -= 9
+
+    if idx <= 3 and not state.forced_switch:
+        if len(request_moves) == 1:
+            pseudo = str(request_moves[0].get("id", "")).lower()
+            if pseudo in ("recharge", "fight"):
+                return "move 1"
+            if pseudo == "struggle":
+                return "move struggle"
+        moves = consistent_move_order(state.player_active_pokemon.moves)
+        if idx >= len(moves):
+            return None
+        selected = move_name(moves[idx].name)
+        for move in request_moves:
+            if move.get("disabled", False):
+                continue
+            if move_name(move.get("id", "")) == selected:
+                choice = f"move {move.get('id')}"
+                if wants_tera and state.can_tera:
+                    choice += " terastallize"
+                return choice
+        return None
+
+    if 4 <= idx <= 8:
+        switch_idx = idx - 4
+        switches = consistent_pokemon_order(state.available_switches)
+        if switch_idx >= len(switches):
+            return None
+        selected = switches[switch_idx]
+        target_ids = {
+            pokemon_name(selected.name),
+            pokemon_name(selected.base_species),
+        }
+        for slot, pokemon in enumerate(
+            request.get("side", {}).get("pokemon", ()), start=1
+        ):
+            if pokemon.get("active", False):
+                continue
+            species = str(pokemon.get("details", "")).split(",", 1)[0]
+            if pokemon_name(species) in target_ids:
+                return f"switch {slot}"
+    return None
 
 
 def _switch_to_slot(order: BattleOrder, choice: str, request: Optional[dict]) -> str:

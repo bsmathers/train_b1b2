@@ -36,6 +36,7 @@ class MetamonBackendBattle(pe.AbstractBattle):
         logger: Logger,
         save_replays: str | bool,
         gen: int,
+        retain_turn_history: bool = True,
     ):
         self._battle_tag = battle_tag
         self._username = username
@@ -45,7 +46,9 @@ class MetamonBackendBattle(pe.AbstractBattle):
         self._mm_battle = mrp.replay_state.ParsedReplay(
             gameid=battle_tag, time_played=datetime.now(), gen=gen
         )
-        self._sim_protocol = mrp.forward.SimProtocol(self._mm_battle)
+        self._sim_protocol = mrp.forward.SimProtocol(
+            self._mm_battle, retain_turn_history=retain_turn_history
+        )
 
         # Turn choice attributes
         self.in_teampreview: bool = False
@@ -398,7 +401,9 @@ class MetamonBackendBattle(pe.AbstractBattle):
             can_tera=self.can_tera is not None,
             opponent_teampreview=preview,
         )
-        return UniversalState.from_ReplayState(state)
+        return UniversalState.from_ReplayState(
+            state, use_pokemon_snapshot_cache=True
+        )
 
     @property
     def active_pokemon(self) -> Any:
@@ -406,6 +411,12 @@ class MetamonBackendBattle(pe.AbstractBattle):
         metamon_p = self._current_turn.get_active_pokemon(p1)[0]
         pe_p = self._convert_pokemon(metamon_p)
         return pe_p
+
+    @property
+    def native_active_pokemon_present(self) -> bool:
+        """Check active materialization without building a poke-env wrapper."""
+        p1 = self.player_role == "p1"
+        return self._current_turn.get_active_pokemon(p1)[0] is not None
 
     @property
     def all_active_pokemons(self) -> List[Optional[pe.Pokemon]]:

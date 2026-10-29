@@ -92,6 +92,15 @@ class StreamBattleLane:
                 logger=_LANE_LOGGER,
                 save_replays=False,
                 gen=self.gen,
+                # Gen 1 has no Illusion/replace protocol, the only online
+                # parser feature that searches historical turns. Do not copy
+                # the entire battle twice per simulated turn merely to discard
+                # it below. Keep an environment override for differential
+                # verification and emergency fallback.
+                retain_turn_history=(
+                    self.gen != 1
+                    or os.environ.get("METAMON_NATIVE_RETAIN_TURN_HISTORY") == "1"
+                ),
             )
             for side in SIDES
         }
@@ -237,7 +246,7 @@ class StreamBattleLane:
         # already be cleared before we answer. Only gate move decisions on the
         # active Pokemon being materialized (battle start |request| before |switch|).
         if kind == KIND_MOVE:
-            return self._battles[side].active_pokemon is not None
+            return self._battles[side].native_active_pokemon_present
         return True
 
     def decision_ready(self) -> bool:
@@ -298,7 +307,7 @@ class StreamBattleLane:
             state = self.universal_state(side)
         if type(action_space) is DefaultActionSpace:
             legal = default_action_legal_indices(
-                state, battle, self.last_request[side]
+                state, self.last_request[side]
             )
             if os.environ.get("METAMON_NATIVE_VERIFY_FAST_LEGAL") == "1":
                 generic_actions = UniversalAction.definitely_valid_actions(

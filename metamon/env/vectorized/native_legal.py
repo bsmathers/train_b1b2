@@ -9,6 +9,7 @@ These aliases are *not* arbitrary trainer choices. Map automatic decisions to
 canonical action 0; only the Struggle case may still allow regular switches.
 """
 
+from metamon.backend.replay_parser.str_parsing import move_name, pokemon_name
 from metamon.interface import consistent_move_order, consistent_pokemon_order
 
 
@@ -25,18 +26,23 @@ def canonical_legal_indices(regular_legal, request):
     return list(regular_legal)
 
 
-def default_action_legal_indices(state, battle, request):
+def default_action_legal_indices(state, request):
     """Fast equivalent of ``UniversalAction.definitely_valid_actions``.
 
-    The generic implementation builds a ``BattleOrder`` for every candidate
-    action. Native collection uses the fixed 13-way DefaultActionSpace, so the
-    same membership checks can be performed once per decision without creating
-    temporary orders. ``METAMON_NATIVE_VERIFY_FAST_LEGAL=1`` makes the caller
-    compare this result with the generic path on every state.
+    The native request already contains the enabled move ids, switch slots,
+    trap state, and force-switch state, while ``state`` defines the model's
+    stable sorted action ordering. Compute their intersection directly instead
+    of materializing a complete poke-env Pokemon/team graph. The optional
+    verifier in the caller still compares this result to the generic path.
     """
-    valid_moves = {move.id for move in battle.available_moves}
-    active = (request or {}).get("active") or []
+    request = request or {}
+    active = request.get("active") or []
     request_moves = active[0].get("moves") or [] if active else []
+    valid_moves = {
+        move_name(move.get("id", ""))
+        for move in request_moves
+        if not move.get("disabled", False)
+    }
     pseudo = (
         str(request_moves[0].get("id", "")).lower()
         if len(request_moves) == 1
@@ -48,30 +54,25 @@ def default_action_legal_indices(state, battle, request):
     legal = []
     if pseudo == "struggle" or valid_moves == {"struggle"}:
         legal.append(0)
-    elif not battle.force_switch:
-        move_options = consistent_move_order(
-            list(battle.active_pokemon.moves.values())
-        )
+    elif not state.forced_switch:
+        move_options = consistent_move_order(state.player_active_pokemon.moves)
         for index, move in enumerate(move_options[:4]):
-            if move.id in valid_moves:
+            if move_name(move.name) in valid_moves:
                 legal.append(index)
                 if state.can_tera:
                     legal.append(index + 9)
 
-    valid_switches = {pokemon.name for pokemon in battle.available_switches}
-    if not battle.reviving:
-        switch_pool = [
-            pokemon
-            for pokemon in battle.team.values()
-            if not pokemon.fainted and not pokemon.active
-        ]
-    else:
-        switch_pool = [
-            pokemon
-            for pokemon in battle.team.values()
-            if pokemon.fainted and not pokemon.active
-        ]
-    for index, pokemon in enumerate(consistent_pokemon_order(switch_pool)[:5]):
-        if pokemon.name in valid_switches:
+    trapped = bool(active and active[0].get("trapped", False))
+    valid_switches = set()
+    if not trapped:
+        for pokemon in request.get("side", {}).get("pokemon", ()):
+            condition = str(pokemon.get("condition", ""))
+            if pokemon.get("active", False) or "fnt" in condition.split():
+                continue
+            species = str(pokemon.get("details", "")).split(",", 1)[0]
+            valid_switches.add(pokemon_name(species))
+    switch_pool = consistent_pokemon_order(state.available_switches)
+    for index, pokemon in enumerate(switch_pool[:5]):
+        if pokemon_name(pokemon.name) in valid_switches:
             legal.append(index + 4)
     return sorted(legal)

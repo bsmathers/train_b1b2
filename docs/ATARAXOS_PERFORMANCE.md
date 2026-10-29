@@ -192,6 +192,44 @@ output, and 0.9% sending commands. The remaining optimization target is the
 Python replay parser/state adapter; changing the Zig simulator is unlikely to
 move end-to-end throughput materially.
 
+### Historyless online adapter
+
+The offline parser originally retained two kinds of snapshots that native
+self-play never consumes: every completed turn and a deep-copied battle at each
+mid-turn forced switch. Native lanes now opt into a historyless parser mode.
+It advances the live turn in place, clears the same ephemeral fields as the
+offline copy path, and uses a lightweight filled-subturn marker. Offline replay
+parsing retains its original full-history behavior.
+
+The online observation path also now:
+
+- caches immutable cleaned move metadata while copying live PP into snapshots;
+- caches Pokemon and move snapshots by all observation-visible mutable fields;
+- derives the 13-way legal mask directly from the private simulator request;
+- translates an action directly to a Showdown choice from the universal state
+  and request, avoiding a replay-Pokemon -> poke-env-Pokemon -> BattleOrder
+  round trip; and
+- checks whether an active Pokemon has materialized without constructing a
+  poke-env wrapper.
+
+The old implementations remain available behind verification environment
+variables. A 250-game run with direct-state, fast-legality, and fast-choice
+verification enabled found no disagreement. Without verification, the final
+deterministic 500-game run produced exactly the same 230-240 result, three
+natural draws, 27 decision-limit timeouts, and 6,310 vector steps as the
+pre-optimization run:
+
+```text
+completed games/minute:       2,434.7
+decisive games/minute:        2,288.6
+lane-steps/second:            4,096.8
+```
+
+That is 2.64x the original 922.7 games/minute full-adapter baseline. In this
+run, steady Zig execution was still only 1.3% of native-host active time. The
+largest remaining bucket is protocol emission and Python replay parsing; the
+model-free reward/observation boundary is secondary.
+
 ## Feeding an Ataraxos learner
 
 The recommended scaling boundary is a complete decisive trajectory, tagged by

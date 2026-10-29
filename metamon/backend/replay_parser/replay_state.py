@@ -132,6 +132,14 @@ class Move(PEMove):
         self.gen_ = gen
         self.pp = self.current_pp  # split from poke-env PP counter
         self.maximum_pp = self.pp
+        # Populated lazily by UniversalMove.from_ReplayMove. Move identity,
+        # type/category, power, accuracy, and priority do not change while a
+        # replay Move is alive; only the PP counters do. Caching those cleaned
+        # adapter fields avoids repeated dex/name normalization on every
+        # simulated decision while keeping each UniversalMove snapshot's PP
+        # current.
+        self._universal_static = None
+        self._universal_snapshot = None
 
     def set_pp(self, pp: int):
         self.pp = pp
@@ -817,6 +825,25 @@ class Turn:
         next_turn = copy.deepcopy(self, memo)
         next_turn.turn_number += 1
         return next_turn
+
+    def advance_in_place(self) -> None:
+        """Advance an online-only turn without preserving replay history.
+
+        ``create_next_turn`` must deepcopy the entire battle because offline
+        replay parsing retains every historical state. A native self-play lane
+        discards history immediately and only needs the next mutable state.
+        Reset exactly the fields discarded by ``create_next_turn`` and apply
+        the same end-of-turn Pokemon cleanup in place.
+        """
+        self.moves_1 = [None, None]
+        self.moves_2 = [None, None]
+        self.choices_1 = [None, None]
+        self.choices_2 = [None, None]
+        self.subturns = []
+        self.replacements_1 = []
+        self.replacements_2 = []
+        self.turn_number += 1
+        self.on_end_of_turn()
 
     def create_subturn(self, force_switch: bool) -> "Turn":
         subturn = copy.deepcopy(self, {id(self.subturns): []})

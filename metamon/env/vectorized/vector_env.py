@@ -37,6 +37,7 @@ import numpy as np
 
 from metamon.interface import (
     ActionSpace,
+    DefaultActionSpace,
     ObservationSpace,
     RewardFunction,
     UniversalState,
@@ -49,7 +50,11 @@ from metamon.backend.team_preview.order import (
     species_from_details,
 )
 
-from .action_adapter import DEFAULT_CHOICE, action_idx_to_choice
+from .action_adapter import (
+    DEFAULT_CHOICE,
+    action_idx_to_choice,
+    action_idx_to_native_choice,
+)
 from .lane import (
     AGENT_KINDS,
     KIND_FORCESWITCH,
@@ -579,7 +584,24 @@ class VectorizedShowdownEnv(gym.Env):
                     "a random legal action for an invalid policy output."
                 )
             idx = int(self._rng.choice(legal)) if legal else idx
-        choice = action_idx_to_choice(idx, lane.battle(side), lane.last_request[side])
+        if type(action_space) is DefaultActionSpace:
+            choice = action_idx_to_native_choice(
+                idx, state, lane.last_request[side]
+            )
+            if os.environ.get("METAMON_NATIVE_VERIFY_FAST_CHOICE") == "1":
+                generic = action_idx_to_choice(
+                    idx, lane.battle(side), lane.last_request[side]
+                )
+                if choice != generic:
+                    raise RuntimeError(
+                        "fast native choice disagrees with BattleOrder path: "
+                        f"fast={choice!r}, generic={generic!r}, idx={idx}, "
+                        f"request={lane.last_request[side]}"
+                    )
+        else:
+            choice = action_idx_to_choice(
+                idx, lane.battle(side), lane.last_request[side]
+            )
         if choice is None:
             if os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
                 raise RuntimeError(
