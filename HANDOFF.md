@@ -229,7 +229,7 @@ native self-play. Infrastructure requirements are:
 8. a synchronous update hook, with the eventual Ataraxos objective kept out of
    the collector plumbing.
 
-The currently uncommitted skeleton now satisfies the collection-side
+The committed skeleton now satisfies the collection-side
 requirements above. Focused contract tests pass, and a real native-Zig smoke
 round loaded `policy_epoch_51.pt`, collected an exact two-decisive-game quota,
 flushed compressed replays, and validated every stored action and metadata row.
@@ -244,6 +244,24 @@ DefaultActionSpace legality calculation. On the repeatable 32-lane adapter
 benchmark, throughput increased from 618.5 to about 1,120 lane-steps/second
 (about 81%). `PROFILE=1` enables production-host boundary timings; see
 `docs/ATARAXOS_PERFORMANCE.md`.
+
+The legacy text boundary was then isolated as the main simulator bottleneck.
+Commit `9b91c800` adds an opt-in binary native-state transport: each decision
+emits the Zig engine's authoritative 384-byte battle image, encoded result, and
+legal engine choices for both sides in one frame. It completely skips JS log
+decoding/request construction and Python Showdown/replay parsing. The included
+lossless trajectory handler enforces state/action alignment. A 10,000-game,
+64-lane local random-vs-random run reached about 158,000 games/minute and
+274,000 lane-steps/second with one host, versus roughly 2,400 games/minute
+through the full compatibility adapter. Four hosts were slower, so use one
+native host per collector process at this boundary.
+
+Binary state is not yet the model-facing default. The remaining integration is
+an exact per-POV decoder into `GroupedObservationSpace`, including revealed-move
+history and hidden-information rules, checked differentially against the text
+adapter. Do not enable `METAMON_NATIVE_BINARY_STATE=1` in training until that
+decoder is complete; the current binary mode is for raw trajectory collection
+and boundary profiling.
 
 The collector also defaults to one joint forward for both self-play sides while
 keeping independent RL2/KV state. A deterministic native comparison matched all
