@@ -192,6 +192,8 @@ class VectorizedShowdownEnv(gym.Env):
         self._collection_games_saved = 0
         self._collection_decision_target: Optional[int] = None
         self._collection_decisions_saved = 0
+        self._collection_unresolved_games = 0
+        self._collection_unresolved_decisions = 0
         self._collection_stop_restarts = False
         self._parked_lanes = np.zeros((self.batched_envs,), dtype=bool)
         self._last_eval_obs_and_info: List[Optional[Tuple[dict, dict]]] = [
@@ -465,6 +467,8 @@ class VectorizedShowdownEnv(gym.Env):
         self._collection_decision_target = None
         self._collection_games_saved = 0
         self._collection_decisions_saved = 0
+        self._collection_unresolved_games = 0
+        self._collection_unresolved_decisions = 0
         self._collection_stop_restarts = False
         self._parked_lanes.fill(False)
 
@@ -482,6 +486,8 @@ class VectorizedShowdownEnv(gym.Env):
         self._collection_decision_target = target
         self._collection_decisions_saved = 0
         self._collection_games_saved = 0
+        self._collection_unresolved_games = 0
+        self._collection_unresolved_decisions = 0
         self._collection_stop_restarts = False
         self._parked_lanes.fill(False)
 
@@ -501,6 +507,9 @@ class VectorizedShowdownEnv(gym.Env):
 
     def collection_draining(self) -> bool:
         return bool(self._collection_stop_restarts)
+
+    def collection_unresolved_count(self) -> tuple[int, int]:
+        return self._collection_unresolved_games, self._collection_unresolved_decisions
 
     def record_policy_metadata(
         self,
@@ -1456,6 +1465,12 @@ class VectorizedShowdownEnv(gym.Env):
                     )
                     if self._collection_decisions_saved >= self._collection_decision_target:
                         self._collection_stop_restarts = True
+
+        if self._ataraxos_metadata_enabled and result == "UNRESOLVED":
+            self._collection_unresolved_games += 1
+            self._collection_unresolved_decisions += (
+                len(self._traj_actions[i]) + len(self._opp_traj_actions[i])
+            )
 
         if self.save_results_to is not None:
             with open(self.save_results_to, "a") as f:
