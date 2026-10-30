@@ -190,6 +190,13 @@ class VectorizedShowdownEnv(gym.Env):
         self._behavior_policy_id: Optional[str] = None
         self._collection_game_target: Optional[int] = None
         self._collection_games_saved = 0
+        self._collection_decision_target: Optional[int] = None
+        self._collection_decisions_saved = 0
+        self._collection_stop_restarts = False
+        self._parked_lanes = np.zeros((self.batched_envs,), dtype=bool)
+        self._last_eval_obs_and_info: List[Optional[Tuple[dict, dict]]] = [
+            None for _ in range(self.batched_envs)
+        ]
 
         # Compressing a full replay on the simulator thread creates avoidable
         # bubbles.  Ataraxos enables a small bounded writer pool; the bound is
@@ -455,9 +462,32 @@ class VectorizedShowdownEnv(gym.Env):
         if target <= 0:
             raise ValueError(f"collection target must be positive, got {target}")
         self._collection_game_target = target
+        self._collection_decision_target = None
         self._collection_games_saved = 0
+        self._collection_decisions_saved = 0
+        self._collection_stop_restarts = False
+        self._parked_lanes.fill(False)
+
+    def set_collection_decision_target(self, target: int) -> None:
+        """Collect at least target completed-game decisions, then drain live lanes.
+
+        Once the threshold is reached, do not start more games; preserve every
+        already-running battle to completion instead of throwing it away.
+        Decisions in unresolved timeouts do not count toward the target.
+        """
+        target = int(target)
+        if target <= 0:
+            raise ValueError(f"collection decision target must be positive, got {target}")
+        self._collection_game_target = None
+        self._collection_decision_target = target
+        self._collection_decisions_saved = 0
+        self._collection_games_saved = 0
+        self._collection_stop_restarts = False
+        self._parked_lanes.fill(False)
 
     def collection_game_target_reached(self) -> bool:
+        if self._collection_decision_target is not None:
+            return self._collection_stop_restarts and bool(self._parked_lanes.all())
         return (
             self._collection_game_target is not None
             and self._collection_games_saved >= self._collection_game_target
@@ -465,6 +495,12 @@ class VectorizedShowdownEnv(gym.Env):
 
     def collection_game_count(self) -> int:
         return int(self._collection_games_saved)
+
+    def collection_decision_count(self) -> int:
+        return int(self._collection_decisions_saved)
+
+    def collection_draining(self) -> bool:
+        return bool(self._collection_stop_restarts)
 
     def record_policy_metadata(
         self,
@@ -627,7 +663,7 @@ class VectorizedShowdownEnv(gym.Env):
                 idx, lane.battle(side), lane.last_request[side]
             )
         if choice is None:
-            if os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
+            if self._ataraxos_metadata_enabled or os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
                 raise RuntimeError(
                     f"Cannot translate legal action lane={i} side={side} idx={idx}"
                 )
@@ -1037,6 +1073,8 @@ class VectorizedShowdownEnv(gym.Env):
             if hasattr(self.opponent_team_set, "seed"):
                 self.opponent_team_set.seed(seed + 2)
         self.opponent.reset_all()
+        self._parked_lanes.fill(False)
+        self._last_eval_obs_and_info = [None for _ in range(self.batched_envs)]
         for i in range(self.batched_envs):
             if self._saving:
                 self._traj_states[i] = []
@@ -1071,6 +1109,7 @@ class VectorizedShowdownEnv(gym.Env):
         obs_list, infos = [], []
         for i in range(self.batched_envs):
             obs, info = self._build_eval_obs_and_info(i)
+            self._last_eval_obs_and_info[i] = (obs, info)
             obs_list.append(obs)
             infos.append(info)
         batched_obs = stack_obs_dicts(obs_list)
@@ -1250,8 +1289,13 @@ class VectorizedShowdownEnv(gym.Env):
                             natural_draw=bool(lane.ended and lane.winner is None),
                             truncated=bool(truncated[i]),
                         )
-                    self._start_lane(i)
-                    restarted.append(i)
+                    if self._collection_stop_restarts:
+                        # Keep the terminal lane parked while the remaining
+                        # in-flight battles finish. Never start an unused game.
+                        self._parked_lanes[i] = True
+                    else:
+                        self._start_lane(i)
+                        restarted.append(i)
 
         done_mask = terminated | truncated
         self._pending_behavior_log_probs = None
@@ -1269,7 +1313,16 @@ class VectorizedShowdownEnv(gym.Env):
         obs_list, legal_actions = [], []
         with self._profile_section("build_obs"):
             for i in range(self.batched_envs):
-                obs, info = self._build_eval_obs_and_info(i)
+                if self._parked_lanes[i]:
+                    # Inactive lanes still need valid input for packed inference.
+                    # Their recurrent caches are restored by the driver.
+                    previous = self._last_eval_obs_and_info[i]
+                    if previous is None:
+                        raise RuntimeError("parked lane missing cached observation")
+                    obs, info = previous
+                else:
+                    obs, info = self._build_eval_obs_and_info(i)
+                    self._last_eval_obs_and_info[i] = (obs, info)
                 obs_list.append(obs)
                 legal_actions.append(info["legal_actions"])
             batched_obs = stack_obs_dicts(obs_list)
@@ -1395,12 +1448,14 @@ class VectorizedShowdownEnv(gym.Env):
                     values=self._opp_traj_behavior_values[i],
                     legal=self._opp_traj_behavior_legal[i],
                 )
-            if self._collection_game_target is not None and result in (
-                "WIN",
-                "LOSS",
-                "DRAW",
-            ):
+            if result in ("WIN", "LOSS", "DRAW"):
                 self._collection_games_saved += 1
+                if self._collection_decision_target is not None:
+                    self._collection_decisions_saved += (
+                        len(self._traj_actions[i]) + len(self._opp_traj_actions[i])
+                    )
+                    if self._collection_decisions_saved >= self._collection_decision_target:
+                        self._collection_stop_restarts = True
 
         if self.save_results_to is not None:
             with open(self.save_results_to, "a") as f:
