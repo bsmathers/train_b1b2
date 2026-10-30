@@ -816,6 +816,8 @@ def collect_round(
         "decisions": summary["steps"],
         "target_decisions": args.target_decisions,
         "drain_completed_games": decision_mode,
+        "unresolved_games": env.collection_unresolved_count()[0],
+        "unresolved_decisions": env.collection_unresolved_count()[1],
         "vector_steps": vector_steps,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * collected_games / max(elapsed, 1e-6):.3f}",
