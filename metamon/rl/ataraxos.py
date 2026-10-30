@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import hashlib
 import os
 import platform
@@ -28,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -250,6 +252,10 @@ class JointNativePolicyDriver:
         )
         self._prefetched_active: np.ndarray | None = None
         self._prefetched_actions: np.ndarray | None = None
+        # Metadata is queued per physical opponent lane because the native
+        # adapter may request additional opponent-only decisions while settling
+        # a turn.  A single "last output" slot silently misaligns those cases.
+        self._opponent_metadata = [deque() for _ in range(self.lanes)]
 
     def _caster(self):
         enabled = self.device.type == "cuda" and self.mixed_precision != "no"
@@ -351,10 +357,15 @@ class JointNativePolicyDriver:
         )
         with torch.inference_mode(), self._caster():
             eval_probs = probs[: self.lanes]
-            value_probs = self.policy.wld_value(
-                states[: self.lanes, -1, :]
+            all_value_probs = self.policy.wld_value(
+                states[:, -1, :]
             ).float().softmax(-1)
-            legal = ~torch_obs["illegal_actions"][: self.lanes, -1].bool()
+            all_legal = ~torch_obs["illegal_actions"][:, -1].bool()
+            all_log_probs = torch.where(
+                probs > 0,
+                probs.clamp_min(1e-30).log(),
+                torch.full_like(probs, -70.0),
+            )
             log_probs = torch.where(
                 eval_probs > 0,
                 eval_probs.clamp_min(1e-30).log(),
@@ -364,9 +375,12 @@ class JointNativePolicyDriver:
                 (
                     actions[: self.lanes, None].float(),
                     log_probs,
-                    value_probs,
-                    legal.float(),
+                    all_value_probs[: self.lanes],
+                    all_legal[: self.lanes].float(),
                     actions[self.lanes :, None].float(),
+                    all_log_probs[self.lanes :],
+                    all_value_probs[self.lanes :],
+                    all_legal[self.lanes :].float(),
                 ),
                 dim=-1,
             ).cpu().numpy()
@@ -374,6 +388,22 @@ class JointNativePolicyDriver:
         logp_end = action_end + self.action_dim
         value_end = logp_end + 3
         legal_end = value_end + self.action_dim
+        opp_action_col = legal_end
+        opp_log_start = opp_action_col + 1
+        opp_log_end = opp_log_start + self.action_dim
+        opp_value_end = opp_log_end + 3
+        opp_legal_end = opp_value_end + self.action_dim
+        for lane in np.flatnonzero(opponent_active):
+            self._opponent_metadata[int(lane)].append(
+                (
+                    int(packed[lane, opp_action_col]),
+                    packed[lane, opp_log_start:opp_log_end].copy(),
+                    packed[lane, opp_log_end:opp_value_end].copy(),
+                    packed[lane, opp_value_end:opp_legal_end].astype(
+                        bool, copy=True
+                    ),
+                )
+            )
         if opponent_active.any():
             self._prefetched_active = opponent_active.copy()
             self._prefetched_actions = packed[:, legal_end].astype(
@@ -405,10 +435,44 @@ class JointNativePolicyDriver:
             return actions
         from metamon.env.vectorized.obs_utils import stack_obs_dicts
 
-        _states, _probs, actions, _torch_obs = self._forward(
+        states, probs, actions, torch_obs = self._forward(
             stack_obs_dicts(obs_list), self.lanes, 2 * self.lanes, active
         )
-        return actions.cpu().numpy().astype(np.int64, copy=False)
+        with torch.inference_mode(), self._caster():
+            values = self.policy.wld_value(states[:, -1, :]).float().softmax(-1)
+            legal = ~torch_obs["illegal_actions"][:, -1].bool()
+            log_probs = torch.where(
+                probs > 0,
+                probs.clamp_min(1e-30).log(),
+                torch.full_like(probs, -70.0),
+            )
+            packed = torch.cat(
+                (actions[:, None].float(), log_probs, values, legal.float()), -1
+            ).cpu().numpy()
+        for lane in np.flatnonzero(active):
+            self._opponent_metadata[int(lane)].append(
+                (
+                    int(packed[lane, 0]),
+                    packed[lane, 1 : 1 + self.action_dim].copy(),
+                    packed[
+                        lane, 1 + self.action_dim : 4 + self.action_dim
+                    ].copy(),
+                    packed[lane, 4 + self.action_dim :].astype(bool, copy=True),
+                )
+            )
+        return packed[:, 0].astype(np.int64, copy=False)
+
+    def consume_policy_metadata(self, lanes: np.ndarray):
+        """Pop exact behavior outputs for committed opponent decisions."""
+        output = []
+        for lane in np.asarray(lanes, dtype=np.int64):
+            queue = self._opponent_metadata[int(lane)]
+            if not queue:
+                raise RuntimeError(
+                    f"missing queued opponent behavior metadata for lane {lane}"
+                )
+            output.append(queue.popleft())
+        return output
 
     def _observe_slice(
         self,
@@ -471,6 +535,8 @@ class JointNativePolicyDriver:
         )
         self._prefetched_active = None
         self._prefetched_actions = None
+        for queue in self._opponent_metadata:
+            queue.clear()
 
 
 def _publish_behavior_checkpoint(checkpoint: Path, policy_root: Path) -> tuple[str, Path]:
@@ -539,11 +605,15 @@ def collect_round(
     replay_root = round_dir / "replays"
     existing = list((replay_root / args.battle_format).glob("*.json.lz4"))
     existing_games = 0
+    existing_trajectories = 0
     if existing:
         existing_summary = validate_buffer(
             replay_root, workers=args.validation_workers
         )
-        existing_games = int(existing_summary["games"])
+        existing_trajectories = int(existing_summary["games"])
+        if existing_trajectories % 2:
+            raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
+        existing_games = existing_trajectories // 2
         if existing_summary["policy_id"] != policy_id:
             raise RuntimeError(
                 f"round {round_index} already contains a different behavior policy"
@@ -551,7 +621,7 @@ def collect_round(
         if existing_games >= args.games:
             print(
                 f"[Ataraxos] round={round_index} already complete "
-                f"games={existing_summary['games']}",
+                f"games={existing_games} trajectories={existing_trajectories}",
                 flush=True,
             )
             return round_dir, existing_summary, immutable_checkpoint
@@ -708,7 +778,10 @@ def collect_round(
     summary = validate_buffer(replay_root, workers=args.validation_workers)
     timed("replay_validation", tick)
     elapsed = time.monotonic() - started
-    collected_games = int(summary["games"]) - existing_games
+    if int(summary["games"]) % 2:
+        raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
+    physical_games = int(summary["games"]) // 2
+    collected_games = (int(summary["games"]) - existing_trajectories) // 2
     device_name = (
         torch.cuda.get_device_name(device)
         if device.type == "cuda"
@@ -718,7 +791,8 @@ def collect_round(
         "round": round_index,
         "behavior_policy_id": policy_id,
         "behavior_checkpoint": immutable_checkpoint,
-        "games": summary["games"],
+        "games": physical_games,
+        "player_trajectories": summary["games"],
         "games_collected_this_process": collected_games,
         "wins": summary["wins"],
         "draws": summary["draws"],
@@ -745,8 +819,8 @@ def collect_round(
     }
     _write_round_text(round_dir / "round-summary.txt", fields)
     print(
-        f"[Ataraxos] round={round_index} complete games={summary['games']} "
-        f"wins={summary['wins']} losses={summary['losses']} "
+        f"[Ataraxos] round={round_index} complete games={physical_games} "
+        f"player_trajectories={summary['games']} "
         f"rate={fields['games_per_minute']} games/min",
         flush=True,
     )
@@ -767,6 +841,13 @@ def collect_round(
                 f"per_step_ms={per_step_ms:.3f}",
                 flush=True,
             )
+    # The sequential updater may launch DDP on every visible GPU. Release the
+    # collector's CUDA allocations first instead of leaving a large caching
+    # allocator reservation on rank zero.
+    if device.type == "cuda":
+        del env, driver, policy, model
+        gc.collect()
+        torch.cuda.empty_cache()
     return round_dir, summary, immutable_checkpoint
 
 
@@ -805,6 +886,39 @@ def _run_update_hook(
     if not next_checkpoint.is_file():
         raise RuntimeError(f"update hook returned missing checkpoint: {next_checkpoint}")
     return next_checkpoint
+
+
+def _run_evaluation_manager(
+    command: str,
+    round_dir: Path,
+    candidate: Path,
+    parent: Path,
+    architecture_save_root: str,
+    architecture_run_name: str,
+) -> tuple[bool, dict[str, str]]:
+    """Run the synchronous promotion gate used by the sequential pipeline."""
+    result_file = round_dir / "evaluation-result.txt"
+    if result_file.exists():
+        result_file.unlink()
+    env = os.environ.copy()
+    env.update(
+        {
+            "ATARAXOS_EVALUATION_CANDIDATE": str(candidate),
+            "ATARAXOS_EVALUATION_PARENT": str(parent),
+            "ATARAXOS_EVALUATION_DIR": str(round_dir / "evaluation"),
+            "ATARAXOS_EVALUATION_RESULT_FILE": str(result_file),
+            "ATARAXOS_ARCHITECTURE_SAVE_ROOT": architecture_save_root,
+            "ATARAXOS_ARCHITECTURE_RUN_NAME": architecture_run_name,
+        }
+    )
+    subprocess.run(shlex.split(command), env=env, check=True)
+    fields = _read_round_text(result_file)
+    decision = fields.get("promote", "").strip().lower()
+    if decision not in ("yes", "no"):
+        raise RuntimeError(
+            "evaluation manager must write 'promote: yes' or 'promote: no'"
+        )
+    return decision == "yes", fields
 
 
 def main() -> None:
@@ -852,6 +966,22 @@ def main() -> None:
     parser.add_argument("--progress-interval", type=int, default=20)
     parser.add_argument("--max-vector-steps", type=int, default=1_000_000)
     parser.add_argument("--update-command")
+    parser.add_argument(
+        "--evaluation-command",
+        help="Synchronous promotion manager; writes ATARAXOS_EVALUATION_RESULT_FILE.",
+    )
+    parser.add_argument(
+        "--require-evaluation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Refuse pipeline updates without an explicit promotion evaluation.",
+    )
+    parser.add_argument(
+        "--evaluation-interval",
+        type=int,
+        default=10,
+        help="Run the native promotion manager every N rounds (including round zero).",
+    )
     parser.add_argument("--validation-workers", type=int, default=0)
     parser.add_argument(
         "--joint-inference",
@@ -871,11 +1001,18 @@ def main() -> None:
         # decisions, so two terminal games per lane is the closest simple
         # cadence until live streaming is implemented.
         args.games = 2 * args.lanes
-    if min(args.games, args.lanes, args.workers, args.rounds) < 1:
+    if min(
+        args.games, args.lanes, args.workers, args.rounds, args.evaluation_interval
+    ) < 1:
         parser.error("games, lanes, workers and rounds must be positive")
     if min(args.writer_workers, args.validation_workers) < 0 or args.temperature < 0:
         parser.error(
             "writer-workers, validation-workers and temperature must be non-negative"
+        )
+    if not args.joint_inference and args.mode != "inspect":
+        parser.error(
+            "dual-POV Ataraxos collection requires --joint-inference so exact "
+            "opponent behavior metadata is available"
         )
 
     if args.mode == "inspect":
@@ -909,6 +1046,8 @@ def main() -> None:
 
     if not args.update_command:
         parser.error("pipeline mode requires --update-command")
+    if args.require_evaluation and not args.evaluation_command:
+        parser.error("pipeline mode requires --evaluation-command")
     if args.temperature <= 0:
         parser.error(
             "pipeline mode requires temperature > 0 so actions are sampled "
@@ -933,7 +1072,7 @@ def main() -> None:
                 flush=True,
             )
             continue
-        checkpoint = _run_update_hook(
+        candidate_checkpoint = _run_update_hook(
             args.update_command,
             round_dir,
             immutable_checkpoint,
@@ -942,9 +1081,27 @@ def main() -> None:
             architecture_run_name=args.architecture_run_name,
             behavior_temperature=args.temperature,
         )
+        promoted = True
+        evaluation_fields: dict[str, str] = {}
+        evaluation_due = round_index % args.evaluation_interval == 0
+        if args.evaluation_command and evaluation_due:
+            promoted, evaluation_fields = _run_evaluation_manager(
+                args.evaluation_command,
+                round_dir,
+                candidate_checkpoint,
+                parent_checkpoint,
+                args.architecture_save_root,
+                args.architecture_run_name,
+            )
+        checkpoint = candidate_checkpoint if promoted else parent_checkpoint
         _update_round_text(
             round_dir / "round-summary.txt",
             update_status="complete",
+            candidate_checkpoint=candidate_checkpoint,
+            promotion_status="promoted" if promoted else "rejected",
+            evaluation_score=evaluation_fields.get(
+                "score", "deferred" if not evaluation_due else "not-run"
+            ),
             next_checkpoint=checkpoint,
         )
         print(

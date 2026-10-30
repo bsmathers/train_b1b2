@@ -262,18 +262,51 @@ def ataraxos_loss(
     }
 
 
-def _forward_loss(policy, samples, device, caster, args):
+def _prepare_batch(samples, device):
     batch = _to_device(RLData_pad_collate([sample.data for sample in samples]), device)
     old_log, old_value, legal, valid, outcomes = _pad_metadata(samples, device)
-    with caster():
-        step_embeddings = policy.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+    return (
+        batch.obs,
+        batch.rl2s,
+        batch.time_idxs,
+        batch.actions,
+        old_log,
+        old_value,
+        legal,
+        valid,
+        outcomes,
+    )
+
+
+def _forward_loss(
+    policy,
+    obs,
+    rl2s,
+    time_idxs,
+    batch_actions,
+    old_log,
+    old_value,
+    legal,
+    valid,
+    outcomes,
+    device_type,
+    mixed_precision_dtype,
+    mixed_precision_enabled,
+    args,
+):
+    with torch.autocast(
+        device_type=device_type,
+        dtype=mixed_precision_dtype,
+        enabled=mixed_precision_enabled,
+    ):
+        step_embeddings = policy.tstep_encoder(obs=obs, rl2s=rl2s)
         states, _ = policy.traj_encoder(
-            seq=step_embeddings, time_idxs=batch.time_idxs, hidden_state=None
+            seq=step_embeddings, time_idxs=time_idxs, hidden_state=None
         )
         distribution = policy.actor(
             states,
             straight_from_obs={
-                key: batch.obs[key] for key in policy.pass_obs_keys_to_actor
+                key: obs[key] for key in policy.pass_obs_keys_to_actor
             },
         )
         probs = distribution.probs[..., -1, :].float()[:, : valid.shape[1]]
@@ -283,7 +316,7 @@ def _forward_loss(policy, samples, device, caster, args):
             torch.full_like(probs, -70.0),
         )
         value_logits = policy.wld_value(states[:, : valid.shape[1]])
-        actions = batch.actions.argmax(-1)[:, : valid.shape[1]]
+        actions = batch_actions.argmax(-1)[:, : valid.shape[1]]
         return ataraxos_loss(
             new_log_probs=new_log,
             value_logits=value_logits,
@@ -302,9 +335,63 @@ def _forward_loss(policy, samples, device, caster, args):
         )
 
 
+class AtaraxosLearner(torch.nn.Module):
+    """DDP/compile boundary around the recurrent policy/value objective."""
+
+    def __init__(self, policy, device_type, mixed_precision_dtype, enabled, args):
+        super().__init__()
+        self.policy = policy
+        self.device_type = device_type
+        self.mixed_precision_dtype = mixed_precision_dtype
+        self.mixed_precision_enabled = enabled
+        self.args = args
+
+    def forward(
+        self,
+        obs,
+        rl2s,
+        time_idxs,
+        actions,
+        old_log,
+        old_value,
+        legal,
+        valid,
+        outcomes,
+    ):
+        return _forward_loss(
+            self.policy,
+            obs,
+            rl2s,
+            time_idxs,
+            actions,
+            old_log,
+            old_value,
+            legal,
+            valid,
+            outcomes,
+            self.device_type,
+            self.mixed_precision_dtype,
+            self.mixed_precision_enabled,
+            self.args,
+        )
+
+
 def _batches(items, batch_size):
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
+
+
+def _length_bucket_order(items, rng: random.Random, bucket_size: int):
+    """Shuffle full histories while limiting recurrent padding waste."""
+    ordered = sorted(items, key=lambda item: item.steps)
+    buckets = [
+        ordered[start : start + bucket_size]
+        for start in range(0, len(ordered), bucket_size)
+    ]
+    for bucket in buckets:
+        rng.shuffle(bucket)
+    rng.shuffle(buckets)
+    return [item for bucket in buckets for item in bucket]
 
 
 def power_schedule(
@@ -340,7 +427,18 @@ def _ema_update(
 
 
 def update(args) -> Path:
-    device = torch.device(args.device)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    distributed = world_size > 1
+    if distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Ataraxos DDP requires CUDA")
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(backend="nccl")
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA update requested but CUDA is unavailable")
     model, policy = _load_stage1_policy(
@@ -356,12 +454,21 @@ def update(args) -> Path:
     trajectories = _load_trajectories(args.replay_dir, model)
     if args.max_games:
         trajectories = trajectories[: args.max_games]
+    source_games = len(trajectories) // 2
 
     enabled = device.type == "cuda" and args.mixed_precision != "no"
     dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
 
-    def caster():
-        return torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+    learner = AtaraxosLearner(policy, device.type, dtype, enabled, args)
+    if args.compile and device.type == "cuda":
+        learner = torch.compile(learner, dynamic=True, fullgraph=False)
+    if distributed:
+        learner = torch.nn.parallel.DistributedDataParallel(
+            learner,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+        )
 
     state_path = args.parent_checkpoint.with_name("ataraxos_training_state.pt")
     resumed_state = None
@@ -409,10 +516,17 @@ def update(args) -> Path:
     initial_kl_sum = 0.0
     initial_batches = 0
     with torch.no_grad():
-        for samples in _batches(trajectories, args.batch_size):
-            _, metrics = _forward_loss(policy, samples, device, caster, args)
+        # All ranks evaluate a disjoint shard, then reduce the exact mean.
+        for samples in _batches(trajectories[rank::world_size], args.batch_size):
+            _, metrics = learner(*_prepare_batch(samples, device))
             initial_kl_sum += float(metrics["behavior_kl"].cpu())
             initial_batches += 1
+    if distributed:
+        totals = torch.tensor(
+            [initial_kl_sum, float(initial_batches)], device=device
+        )
+        torch.distributed.all_reduce(totals)
+        initial_kl_sum, initial_batches = totals.tolist()
     initial_kl = initial_kl_sum / max(initial_batches, 1)
     if not math.isfinite(initial_kl) or initial_kl > args.max_initial_kl:
         raise RuntimeError(
@@ -434,11 +548,17 @@ def update(args) -> Path:
     final_metrics: dict[str, float] = {}
     optimizer_steps = 0
     for epoch in range(args.update_epochs):
-        order = list(trajectories)
-        rng.shuffle(order)
-        for samples in _batches(order, args.batch_size):
+        order = _length_bucket_order(
+            trajectories, rng, max(args.batch_size * world_size * 8, 32)
+        )
+        per_rank = math.ceil(len(order) / world_size)
+        padded_size = per_rank * world_size
+        repeats = math.ceil(padded_size / len(order))
+        padded = (order * repeats)[:padded_size]
+        rank_order = padded[rank * per_rank : (rank + 1) * per_rank]
+        for samples in _batches(rank_order, args.batch_size):
             optimizer.zero_grad(set_to_none=True)
-            loss, metrics = _forward_loss(policy, samples, device, caster, args)
+            loss, metrics = learner(*_prepare_batch(samples, device))
             if not torch.isfinite(loss):
                 raise RuntimeError("Ataraxos update produced a non-finite loss")
             loss.backward()
@@ -449,13 +569,14 @@ def update(args) -> Path:
             optimizer_steps += 1
             final_metrics = {key: float(value.cpu()) for key, value in metrics.items()}
             final_metrics["grad_norm"] = float(grad_norm.detach().float().cpu())
-        print(
-            f"[AtaraxosUpdate] epoch={epoch} steps={optimizer_steps} "
-            f"loss={final_metrics['loss']:.6f} "
-            f"kl={final_metrics['behavior_kl']:.6f} "
-            f"ratio={final_metrics['ratio_mean']:.6f}",
-            flush=True,
-        )
+        if rank == 0:
+            print(
+                f"[AtaraxosUpdate] epoch={epoch} steps={optimizer_steps} "
+                f"loss={final_metrics['loss']:.6f} "
+                f"kl={final_metrics['behavior_kl']:.6f} "
+                f"ratio={final_metrics['ratio_mean']:.6f}",
+                flush=True,
+            )
 
     ema_state = _ema_update(
         ema_state,
@@ -464,6 +585,11 @@ def update(args) -> Path:
         args.ema_decay,
     )
     output = args.output_checkpoint
+    if distributed:
+        torch.distributed.barrier()
+    if rank != 0:
+        torch.distributed.destroy_process_group()
+        return output
     _atomic_torch_save(policy.state_dict(), output)
     optimizer_output = output.with_name("optimizer_after_update.pt")
     _atomic_torch_save(optimizer.state_dict(), optimizer_output)
@@ -489,7 +615,8 @@ def update(args) -> Path:
         "training_state": training_state_output,
         "ema_checkpoint": ema_output,
         "optimizer_resumed": optimizer_resumed,
-        "games": len(trajectories),
+        "games": source_games,
+        "player_trajectories": len(trajectories),
         "decisions": sum(item.steps for item in trajectories),
         "update_epochs": args.update_epochs,
         "optimizer_steps": optimizer_steps,
@@ -501,6 +628,8 @@ def update(args) -> Path:
         "td_lambda": args.td_lambda,
         "ema_decay": args.ema_decay,
         "behavior_temperature": args.temperature,
+        "distributed_world_size": world_size,
+        "compiled": bool(args.compile and device.type == "cuda"),
         "initial_behavior_kl": f"{initial_kl:.8f}",
     }
     summary.update({key: f"{value:.8f}" for key, value in final_metrics.items()})
@@ -508,6 +637,8 @@ def update(args) -> Path:
     temporary = args.next_checkpoint_file.with_suffix(".tmp")
     temporary.write_text(str(output.resolve()) + "\n", encoding="utf-8")
     os.replace(temporary, args.next_checkpoint_file)
+    if distributed:
+        torch.distributed.destroy_process_group()
     return output
 
 
@@ -523,6 +654,12 @@ def main() -> None:
     parser.add_argument("--summary-file")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--mixed-precision", choices=("no", "bf16"), default="bf16")
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compile the learner graph on CUDA (disable for debugging).",
+    )
     parser.add_argument("--update-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-games", type=int, default=0)

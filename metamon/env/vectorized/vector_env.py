@@ -168,6 +168,21 @@ class VectorizedShowdownEnv(gym.Env):
         self._traj_behavior_legal: List[List[List[bool]]] = [
             [] for _ in range(self.batched_envs)
         ]
+        self._opp_traj_states: List[List[UniversalState]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._opp_traj_actions: List[List[int]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._opp_traj_behavior_log_probs: List[List[List[float]]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._opp_traj_behavior_values: List[List[List[float]]] = [
+            [] for _ in range(self.batched_envs)
+        ]
+        self._opp_traj_behavior_legal: List[List[List[bool]]] = [
+            [] for _ in range(self.batched_envs)
+        ]
         self._pending_behavior_log_probs: Optional[np.ndarray] = None
         self._pending_behavior_values: Optional[np.ndarray] = None
         self._pending_behavior_legal: Optional[np.ndarray] = None
@@ -418,6 +433,13 @@ class VectorizedShowdownEnv(gym.Env):
         self._traj_behavior_log_probs[i] = []
         self._traj_behavior_values[i] = []
         self._traj_behavior_legal[i] = []
+        self._opp_traj_states[i] = [
+            self.lanes[i].universal_state(self.opp_side)
+        ]
+        self._opp_traj_actions[i] = []
+        self._opp_traj_behavior_log_probs[i] = []
+        self._opp_traj_behavior_values[i] = []
+        self._opp_traj_behavior_legal[i] = []
 
     def set_behavior_policy_id(self, policy_id: str) -> None:
         """Label subsequent native rollouts with an immutable policy identity."""
@@ -425,6 +447,7 @@ class VectorizedShowdownEnv(gym.Env):
         if not policy_id:
             raise ValueError("behavior policy id must not be empty")
         self._behavior_policy_id = policy_id
+        self._ataraxos_metadata_enabled = True
 
     def set_collection_game_target(self, target: int) -> None:
         """Cap this collector at exactly ``target`` saved terminal games."""
@@ -635,7 +658,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._committed_side_actions[(i, side)] = int(used_idx)
         self.proc.choose(i, side, choice)
 
-    def _choose_opponent_side(self, i: int) -> Tuple[int, int, UniversalState]:
+    def _choose_opponent_side(self, i: int):
         """Answer an opponent-only decision and return its RL2 feedback record.
 
         An opponent action is a genuine model decision even when the evaluated
@@ -646,6 +669,11 @@ class VectorizedShowdownEnv(gym.Env):
         active = np.zeros((self.batched_envs,), dtype=bool)
         active[i] = True
         actions = self.opponent.act(active, self._opp_obs_list(active))
+        metadata = None
+        if self._ataraxos_metadata_enabled:
+            metadata = self.opponent.consume_policy_metadata(
+                np.asarray([i], dtype=np.int64)
+            )[0]
         used_idx, choice = self._resolve_action(
             i,
             self.opp_side,
@@ -654,7 +682,7 @@ class VectorizedShowdownEnv(gym.Env):
         )
         self._committed_side_actions[(i, self.opp_side)] = int(used_idx)
         self.proc.choose(i, self.opp_side, choice)
-        return i, int(used_idx), previous
+        return i, int(used_idx), previous, metadata
 
     def _send_side(self, i: int, side: str, *, reprompt: bool = False) -> None:
         """Re-answer a single side after an ``|error|`` re-prompt.
@@ -714,7 +742,7 @@ class VectorizedShowdownEnv(gym.Env):
             i: {s: self.lanes[i].request_serial[s] for s in SIDES} for i in lane_indices
         }
         err_handled = {i: {s: -1 for s in SIDES} for i in lane_indices}
-        auto_opp_pending: List[Tuple[int, int, UniversalState]] = []
+        auto_opp_pending: List[tuple] = []
 
         def ready() -> bool:
             done = True
@@ -887,7 +915,16 @@ class VectorizedShowdownEnv(gym.Env):
                 if opp_active.any()
                 else None
             )
-            opp_pending: List[Tuple[int, int, UniversalState]] = []
+            opp_pending: List[tuple] = []
+            metadata_by_lane = {}
+            if self._ataraxos_metadata_enabled and opp_active.any():
+                active_lanes = np.flatnonzero(opp_active)
+                metadata_by_lane = dict(
+                    zip(
+                        active_lanes.tolist(),
+                        self.opponent.consume_policy_metadata(active_lanes),
+                    )
+                )
             choices: List[Tuple[int, str, str]] = []
             for i in auto:
                 lane = self.lanes[i]
@@ -913,7 +950,9 @@ class VectorizedShowdownEnv(gym.Env):
                     )
                     side_choices[self.opp_side] = choice
                     self._committed_side_actions[(i, self.opp_side)] = int(used_idx)
-                    opp_pending.append((i, int(used_idx), prev_opp))
+                    opp_pending.append(
+                        (i, int(used_idx), prev_opp, metadata_by_lane.get(i))
+                    )
                 self._append_lane_choices(choices, i, side_choices)
                 lane.mark_settled()
             if choices:
@@ -923,7 +962,7 @@ class VectorizedShowdownEnv(gym.Env):
             pending = auto
 
     def _record_opp_rewards(
-        self, opp_pending: List[Tuple[int, int, UniversalState]]
+        self, opp_pending: List[tuple]
     ) -> None:
         if not opp_pending:
             return
@@ -935,7 +974,7 @@ class VectorizedShowdownEnv(gym.Env):
                 self._committed_side_actions.get(
                     (i, self.opp_side), int(used_idx)
                 )
-                for i, used_idx, _ in opp_pending
+                for i, used_idx, *_ in opp_pending
             ),
             dtype=np.int64,
             count=len(opp_pending),
@@ -944,13 +983,39 @@ class VectorizedShowdownEnv(gym.Env):
             self.opponent.observe_batch(
                 lanes, np.zeros(len(opp_pending), dtype=np.float32), actions
             )
-            return
-        rewards = np.empty(len(opp_pending), dtype=np.float32)
-        for offset, (i, _used_idx, prev_opp) in enumerate(opp_pending):
+            rewards = np.zeros(len(opp_pending), dtype=np.float32)
+        else:
+            rewards = np.empty(len(opp_pending), dtype=np.float32)
+        for offset, pending in enumerate(opp_pending):
+            i, _used_idx, prev_opp, *metadata_item = pending
             new_opp = self.lanes[i].universal_state(self.opp_side)
-            rewards[offset] = float(
-                self.opponent_reward_function(prev_opp, new_opp)
-            )
+            if self.opponent_reward_function is not None:
+                rewards[offset] = float(
+                    self.opponent_reward_function(prev_opp, new_opp)
+                )
+            if self._saving and self._ataraxos_metadata_enabled:
+                if not metadata_item or metadata_item[0] is None:
+                    raise RuntimeError(
+                        "dual-POV Ataraxos decision is missing opponent metadata"
+                    )
+                action, log_probs, values, legal = metadata_item[0]
+                committed = int(actions[offset])
+                if int(action) != committed:
+                    raise RuntimeError(
+                        "native adapter repaired an opponent Ataraxos action; "
+                        "refusing misaligned behavior data"
+                    )
+                if not self._opp_traj_states[i]:
+                    self._opp_traj_states[i] = [prev_opp]
+                # The previous state should be the tail of the same POV stream.
+                # Replace it defensively because parser state objects are cheap
+                # compared with silently training on an off-by-one transition.
+                self._opp_traj_states[i][-1] = prev_opp
+                self._opp_traj_actions[i].append(committed)
+                self._opp_traj_behavior_log_probs[i].append(log_probs.tolist())
+                self._opp_traj_behavior_values[i].append(values.tolist())
+                self._opp_traj_behavior_legal[i].append(legal.tolist())
+                self._opp_traj_states[i].append(new_opp)
         self.opponent.observe_batch(lanes, rewards, actions)
 
     # ----- gym API ---------------------------------------------------------
@@ -973,11 +1038,35 @@ class VectorizedShowdownEnv(gym.Env):
                 self.opponent_team_set.seed(seed + 2)
         self.opponent.reset_all()
         for i in range(self.batched_envs):
+            if self._saving:
+                self._traj_states[i] = []
+                self._traj_actions[i] = []
+                self._traj_behavior_log_probs[i] = []
+                self._traj_behavior_values[i] = []
+                self._traj_behavior_legal[i] = []
+                self._opp_traj_states[i] = []
+                self._opp_traj_actions[i] = []
+                self._opp_traj_behavior_log_probs[i] = []
+                self._opp_traj_behavior_values[i] = []
+                self._opp_traj_behavior_legal[i] = []
             self._start_lane(i)
         self._advance_lanes(list(range(self.batched_envs)))
         if self._saving:
             for i in range(self.batched_envs):
+                # Opponent-only decisions can occur while advancing to the
+                # first eval decision. Preserve those lazily seeded buffers.
+                opp_states = self._opp_traj_states[i]
+                opp_actions = self._opp_traj_actions[i]
+                opp_log = self._opp_traj_behavior_log_probs[i]
+                opp_values = self._opp_traj_behavior_values[i]
+                opp_legal = self._opp_traj_behavior_legal[i]
                 self._init_lane_trajectory(i)
+                if opp_actions:
+                    self._opp_traj_states[i] = opp_states
+                    self._opp_traj_actions[i] = opp_actions
+                    self._opp_traj_behavior_log_probs[i] = opp_log
+                    self._opp_traj_behavior_values[i] = opp_values
+                    self._opp_traj_behavior_legal[i] = opp_legal
 
         obs_list, infos = [], []
         for i in range(self.batched_envs):
@@ -1003,7 +1092,7 @@ class VectorizedShowdownEnv(gym.Env):
         outcome_won: List[Optional[bool]] = [None] * self.batched_envs
         outcome_draw: List[Optional[bool]] = [None] * self.batched_envs
         eval_actions: List[Optional[int]] = [None] * self.batched_envs
-        opp_pending: List[Tuple[int, int, UniversalState]] = []
+        opp_pending: List[tuple] = []
         acted_lanes: List[int] = []
 
         # Lanes parked at an eval-side decision (a normal move or a KO-induced
@@ -1038,6 +1127,15 @@ class VectorizedShowdownEnv(gym.Env):
                 if opp_active.any()
                 else None
             )
+        metadata_by_lane = {}
+        if self._ataraxos_metadata_enabled and opp_active.any():
+            active_lanes = np.flatnonzero(opp_active)
+            metadata_by_lane = dict(
+                zip(
+                    active_lanes.tolist(),
+                    self.opponent.consume_policy_metadata(active_lanes),
+                )
+            )
         with self._profile_section("resolve_actions"):
             choices: List[Tuple[int, str, str]] = []
             for i in acting:
@@ -1060,7 +1158,9 @@ class VectorizedShowdownEnv(gym.Env):
                     )
                     side_choices[self.opp_side] = opp_choice
                     self._committed_side_actions[(i, self.opp_side)] = int(opp_used_idx)
-                    opp_pending.append((i, int(opp_used_idx), prev_opp))
+                    opp_pending.append(
+                        (i, int(opp_used_idx), prev_opp, metadata_by_lane.get(i))
+                    )
                 self._append_lane_choices(choices, i, side_choices)
                 lane.mark_settled()
                 acted_lanes.append(i)
@@ -1219,44 +1319,82 @@ class VectorizedShowdownEnv(gym.Env):
             save_training_trajectory = False
 
         if self.save_trajectories_to is not None and save_training_trajectory:
-            filename = (
-                f"metamon-{self.metamon_battle_format}-{battle_id}_Unrated_"
-                f"{self.player_username}_vs_{opponent_name}_{timestamp}_{result}.json.lz4"
-            )
-            output_json = {
-                # Conversion to nested dictionaries is deliberately deferred to
-                # the writer thread. UniversalState snapshots are immutable and
-                # the lane replaces this list rather than mutating it on reset.
-                "states": self._traj_states[i],
-                "actions": self._traj_actions[i] + [-1],
-            }
-            if self._ataraxos_metadata_enabled:
-                lengths = {
-                    len(self._traj_actions[i]),
-                    len(self._traj_behavior_log_probs[i]),
-                    len(self._traj_behavior_values[i]),
-                    len(self._traj_behavior_legal[i]),
-                }
-                if len(lengths) != 1:
-                    raise RuntimeError(
-                        "Ataraxos behavior metadata is not action-aligned"
-                    )
-                if self._behavior_policy_id is None:
-                    raise RuntimeError("Ataraxos behavior policy id was not set")
-                output_json.update(
-                    {
-                        "ataraxos_collector_version": 2,
-                        "behavior_policy_id": self._behavior_policy_id,
-                        "terminal_outcome": {"LOSS": -1, "DRAW": 0, "WIN": 1}[
-                            result
-                        ],
-                        "behavior_log_probs": self._traj_behavior_log_probs[i],
-                        "behavior_values": self._traj_behavior_values[i],
-                        "behavior_legal_masks": self._traj_behavior_legal[i],
-                    }
+            def submit_pov(
+                *,
+                label: str,
+                pov_result: str,
+                states,
+                actions,
+                log_probs,
+                values,
+                legal,
+            ) -> None:
+                filename = (
+                    f"metamon-{self.metamon_battle_format}-{battle_id}-{label}_"
+                    f"Unrated_{self.player_username}_vs_{opponent_name}_{timestamp}_"
+                    f"{pov_result}.json.lz4"
                 )
-            path = os.path.join(self.save_trajectories_to, filename)
-            self._submit_trajectory_write(path, output_json)
+                output_json = {"states": states, "actions": actions + [-1]}
+                if self._ataraxos_metadata_enabled:
+                    lengths = {
+                        len(actions),
+                        len(log_probs),
+                        len(values),
+                        len(legal),
+                    }
+                    if len(lengths) != 1:
+                        raise RuntimeError(
+                            f"Ataraxos {label} behavior metadata is not action-aligned"
+                        )
+                    if self._behavior_policy_id is None:
+                        raise RuntimeError("Ataraxos behavior policy id was not set")
+                    output_json.update(
+                        {
+                            "ataraxos_collector_version": 2,
+                            "behavior_policy_id": self._behavior_policy_id,
+                            "terminal_outcome": {
+                                "LOSS": -1,
+                                "DRAW": 0,
+                                "WIN": 1,
+                            }[pov_result],
+                            "behavior_log_probs": log_probs,
+                            "behavior_values": values,
+                            "behavior_legal_masks": legal,
+                        }
+                    )
+                self._submit_trajectory_write(
+                    os.path.join(self.save_trajectories_to, filename), output_json
+                )
+
+            submit_pov(
+                label="eval",
+                pov_result=result,
+                states=self._traj_states[i],
+                actions=self._traj_actions[i],
+                log_probs=self._traj_behavior_log_probs[i],
+                values=self._traj_behavior_values[i],
+                legal=self._traj_behavior_legal[i],
+            )
+            if self._ataraxos_metadata_enabled:
+                opponent_final = self.lanes[i].universal_state(self.opp_side)
+                if self._opp_traj_states[i]:
+                    self._opp_traj_states[i][-1] = opponent_final
+                opponent_result = (
+                    "DRAW"
+                    if result == "DRAW"
+                    else "WIN"
+                    if result == "LOSS"
+                    else "LOSS"
+                )
+                submit_pov(
+                    label="opponent",
+                    pov_result=opponent_result,
+                    states=self._opp_traj_states[i],
+                    actions=self._opp_traj_actions[i],
+                    log_probs=self._opp_traj_behavior_log_probs[i],
+                    values=self._opp_traj_behavior_values[i],
+                    legal=self._opp_traj_behavior_legal[i],
+                )
             if self._collection_game_target is not None and result in (
                 "WIN",
                 "LOSS",

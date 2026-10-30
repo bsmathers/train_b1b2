@@ -206,6 +206,14 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         np.testing.assert_array_equal(
             driver.act(opponent_active, []), np.asarray([1, 0])
         )
+        opponent_metadata = driver.consume_policy_metadata(np.asarray([0, 1]))
+        self.assertEqual([item[0] for item in opponent_metadata], [1, 0])
+        self.assertTrue(
+            all(
+                np.isclose(np.exp(item[1]).sum(), 1.0)
+                for item in opponent_metadata
+            )
+        )
         self.assertFalse(driver.has_prefetched_actions(opponent_active))
 
         no_opponent = np.asarray([False, False])
@@ -215,6 +223,10 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         self.assertFalse(driver.has_prefetched_actions(no_opponent))
         np.testing.assert_array_equal(
             driver.act(opponent_active, opponent_obs), np.asarray([1, 0])
+        )
+        self.assertEqual(
+            [item[0] for item in driver.consume_policy_metadata(np.asarray([0, 1]))],
+            [1, 0],
         )
 
 

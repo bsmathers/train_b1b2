@@ -29,6 +29,7 @@ TURN_LIMIT="${TURN_LIMIT:-200}"
 SEED="${SEED:-20261027}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-20}"
 MAX_VECTOR_STEPS="${MAX_VECTOR_STEPS:-1000000}"
+EVALUATION_INTERVAL="${EVALUATION_INTERVAL:-10}"
 
 if [ ! -x "${PYTHON_BIN}" ] && ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "ERROR: Python executable not found: ${PYTHON_BIN}" >&2
@@ -40,6 +41,7 @@ if [ ! -f "${CHECKPOINT}" ]; then
 fi
 if [ "${MODE}" = "pipeline" ]; then
     UPDATE_COMMAND="${UPDATE_COMMAND:-${ROOT_DIR}/tools/update_ataraxos_once.sh}"
+    EVALUATION_COMMAND="${EVALUATION_COMMAND:-${ROOT_DIR}/tools/evaluate_ataraxos_candidate.sh}"
 fi
 
 mkdir -p "${OUTPUT_DIR}"
@@ -76,6 +78,7 @@ COMMAND=(
     --seed "${SEED}"
     --progress-interval "${PROGRESS_INTERVAL}"
     --max-vector-steps "${MAX_VECTOR_STEPS}"
+    --evaluation-interval "${EVALUATION_INTERVAL}"
     --device "${DEVICE}"
     --mixed-precision "${MIXED_PRECISION}"
 )
@@ -87,6 +90,7 @@ if [ -n "${ARCHITECTURE_RUN_NAME:-}" ]; then
 fi
 if [ "${MODE}" = "pipeline" ]; then
     COMMAND+=(--update-command "${UPDATE_COMMAND}")
+    COMMAND+=(--evaluation-command "${EVALUATION_COMMAND}")
 fi
 if [ "${PROFILE}" = "1" ]; then
     COMMAND+=(--profile)

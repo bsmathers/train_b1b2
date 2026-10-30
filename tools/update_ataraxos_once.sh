@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+export TORCHINDUCTOR_CACHE_DIR="${ATARAXOS_COMPILE_CACHE_DIR:-${ATARAXOS_ROUND_DIR%/round_*}/compile-cache}"
+mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
 
 if [ "${DEVICE:-cuda:0}" = "cpu" ]; then
     # The portable attention fallback is already eager-safe; avoiding Dynamo
@@ -18,7 +20,15 @@ if [ -n "${ATARAXOS_MAGNET_COEF:-}" ]; then
     OVERRIDES+=(--magnet-coef "${ATARAXOS_MAGNET_COEF}")
 fi
 
-exec "${PYTHON_BIN}" -m metamon.rl.ataraxos_update \
+LAUNCH=("${PYTHON_BIN}" -m metamon.rl.ataraxos_update)
+if [ "${ATARAXOS_GPUS:-1}" -gt 1 ]; then
+    LAUNCH=(torchrun --standalone --nproc_per_node "${ATARAXOS_GPUS}" -m metamon.rl.ataraxos_update)
+fi
+if [ "${ATARAXOS_COMPILE:-1}" = "0" ]; then
+    OVERRIDES+=(--no-compile)
+fi
+
+exec "${LAUNCH[@]}" \
     --device "${DEVICE:-cuda:0}" \
     --mixed-precision "${MIXED_PRECISION:-bf16}" \
     --update-epochs "${ATARAXOS_UPDATE_EPOCHS:-1}" \
