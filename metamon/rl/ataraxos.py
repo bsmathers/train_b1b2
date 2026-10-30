@@ -607,6 +607,8 @@ def collect_round(
     existing = list((replay_root / args.battle_format).glob("*.json.lz4"))
     existing_games = 0
     existing_trajectories = 0
+    existing_decisions = 0
+    decision_mode = args.target_decisions > 0
     if existing:
         existing_summary = validate_buffer(
             replay_root, workers=args.validation_workers
@@ -615,20 +617,25 @@ def collect_round(
         if existing_trajectories % 2:
             raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
         existing_games = existing_trajectories // 2
+        existing_decisions = int(existing_summary["steps"])
         if existing_summary["policy_id"] != policy_id:
             raise RuntimeError(
                 f"round {round_index} already contains a different behavior policy"
             )
-        if existing_games >= args.games:
+        if (
+            existing_decisions >= args.target_decisions if decision_mode
+            else existing_games >= args.games
+        ):
             print(
                 f"[Ataraxos] round={round_index} already complete "
-                f"games={existing_games} trajectories={existing_trajectories}",
+                f"games={existing_games} decisions={existing_decisions}",
                 flush=True,
             )
             return round_dir, existing_summary, immutable_checkpoint
-        remaining = args.games - existing_games
-    else:
-        remaining = args.games
+    remaining = (
+        args.target_decisions - existing_decisions
+        if decision_mode else args.games - existing_games
+    )
     round_dir.mkdir(parents=True, exist_ok=True)
 
     tick = time.perf_counter()
@@ -711,7 +718,10 @@ def collect_round(
     )
     timed("environment_construction", tick)
     env.set_behavior_policy_id(policy_id)
-    env.set_collection_game_target(remaining)
+    if decision_mode:
+        env.set_collection_decision_target(remaining)
+    else:
+        env.set_collection_game_target(remaining)
     started = time.monotonic()
     vector_steps = 0
     try:
@@ -758,9 +768,14 @@ def collect_round(
             if vector_steps % args.progress_interval == 0:
                 elapsed = max(time.monotonic() - started, 1e-6)
                 games = env.collection_game_count()
+                progress = (
+                    f"decisions={existing_decisions + env.collection_decision_count()}/"
+                    f"{args.target_decisions} draining={env.collection_draining()}"
+                    if decision_mode else f"games={games}/{remaining}"
+                )
                 print(
-                    f"[Ataraxos] round={round_index} games={games}/{remaining} "
-                    f"rate={60.0 * games / elapsed:.1f} games/min",
+                    f"[Ataraxos] round={round_index} {progress} "
+                    f"games={games} rate={60.0 * games / elapsed:.1f} games/min",
                     flush=True,
                 )
             if vector_steps >= args.max_vector_steps:
@@ -799,6 +814,8 @@ def collect_round(
         "draws": summary["draws"],
         "losses": summary["losses"],
         "decisions": summary["steps"],
+        "target_decisions": args.target_decisions,
+        "drain_completed_games": decision_mode,
         "vector_steps": vector_steps,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * collected_games / max(elapsed, 1e-6):.3f}",
@@ -873,7 +890,9 @@ def _collect_child_command(
         "--round",
         str(round_index),
         "--games",
-        str(games),
+        str(games if not args.target_decisions else args.games),
+        "--target-decisions",
+        str(games if args.target_decisions else 0),
         "--lanes",
         str(args.lanes),
         "--workers",
@@ -936,6 +955,8 @@ def collect_sharded_round(
     replay_root = round_dir / "replays"
     existing_files = list((replay_root / args.battle_format).glob("*.json.lz4"))
     existing_games = 0
+    existing_decisions = 0
+    decision_mode = args.target_decisions > 0
     if existing_files:
         existing_summary = validate_buffer(
             replay_root, workers=args.validation_workers
@@ -947,15 +968,22 @@ def collect_sharded_round(
                 f"round {round_index} already contains a different behavior policy"
             )
         existing_games = int(existing_summary["games"]) // 2
-        if existing_games >= args.games:
+        existing_decisions = int(existing_summary["steps"])
+        if (
+            existing_decisions >= args.target_decisions if decision_mode
+            else existing_games >= args.games
+        ):
             print(
                 f"[Ataraxos] round={round_index} already complete "
-                f"games={existing_games}",
+                f"games={existing_games} decisions={existing_decisions}",
                 flush=True,
             )
             return round_dir, existing_summary, immutable_checkpoint
 
-    remaining = args.games - existing_games
+    remaining = (
+        args.target_decisions - existing_decisions
+        if decision_mode else args.games - existing_games
+    )
     shard_count = min(args.collector_shards, remaining)
     base, extra = divmod(remaining, shard_count)
     quotas = [base + (index < extra) for index in range(shard_count)]
@@ -1029,7 +1057,13 @@ def collect_sharded_round(
 
     summary = validate_buffer(replay_root, workers=args.validation_workers)
     physical_games = int(summary["games"]) // 2
-    if physical_games != args.games:
+    if decision_mode:
+        if int(summary["steps"]) < args.target_decisions:
+            raise RuntimeError(
+                f"sharded round produced {summary['steps']} decisions, "
+                f"expected at least {args.target_decisions}"
+            )
+    elif physical_games != args.games:
         raise RuntimeError(
             f"sharded round produced {physical_games} games, expected {args.games}"
         )
@@ -1046,6 +1080,8 @@ def collect_sharded_round(
         "draws": summary["draws"],
         "losses": summary["losses"],
         "decisions": summary["steps"],
+        "target_decisions": args.target_decisions,
+        "drain_completed_games": decision_mode,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * new_games / max(elapsed, 1e-6):.3f}",
         "device": args.device,
@@ -1162,6 +1198,11 @@ def main() -> None:
         default=0,
         help="Terminal games per round; zero chooses two games per lane.",
     )
+    parser.add_argument(
+        "--target-decisions", type=int, default=0,
+        help="Completed-game decisions per round; drain in-flight games at target. "
+        "Zero retains legacy exact completed-game quota.",
+    )
     parser.add_argument("--lanes", type=int, default=64)
     parser.add_argument(
         "--collector-shards",
@@ -1238,7 +1279,7 @@ def main() -> None:
         args.evaluation_interval,
     ) < 1:
         parser.error("games, lanes, workers and rounds must be positive")
-    if min(args.writer_workers, args.validation_workers) < 0 or args.temperature < 0:
+    if min(args.writer_workers, args.validation_workers, args.target_decisions) < 0 or args.temperature < 0:
         parser.error(
             "writer-workers, validation-workers and temperature must be non-negative"
         )
