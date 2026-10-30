@@ -3,7 +3,8 @@
 This module intentionally stops at the data contract.  Advantage estimation and
 the policy/value objectives belong to the update implementation, while the
 collector guarantees that every stored action is paired with the exact behavior
-distribution, value estimate, legal mask, and terminal outcome that produced it.
+distribution, categorical W/L/D estimate, legal mask, and terminal outcome that
+produced it.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import lz4.frame
 import numpy as np
 
 
-COLLECTOR_VERSION = 1
+COLLECTOR_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -73,14 +74,16 @@ def load_rollout(path: str | Path) -> AtaraxosRollout:
     legal = np.asarray(payload.get("behavior_legal_masks"), dtype=bool)
     if log_probs.ndim != 2 or log_probs.shape[0] != actions.size:
         raise ValueError(f"{path}: behavior log probabilities are not action-aligned")
-    if values.shape != (actions.size,):
+    if values.shape != (actions.size, 3):
         raise ValueError(f"{path}: behavior values are not action-aligned")
     if legal.shape != log_probs.shape:
         raise ValueError(f"{path}: behavior legal masks have the wrong shape")
     if not np.isfinite(log_probs).all() or not np.isfinite(values).all():
         raise ValueError(f"{path}: non-finite behavior metadata")
-    if np.any(np.abs(values) > 1.0001):
-        raise ValueError(f"{path}: behavior values are outside [-1, 1]")
+    if np.any(values < -1e-6) or not np.allclose(
+        values.sum(-1), 1.0, atol=2e-3, rtol=0.0
+    ):
+        raise ValueError(f"{path}: behavior W/L/D probabilities are invalid")
     if np.any(actions < 0) or np.any(actions >= log_probs.shape[1]):
         raise ValueError(f"{path}: action index outside behavior distribution")
     if not legal[np.arange(actions.size), actions].all():
@@ -91,12 +94,17 @@ def load_rollout(path: str | Path) -> AtaraxosRollout:
     if np.any(probs[~legal] > 1e-8):
         raise ValueError(f"{path}: illegal action has nonzero behavior probability")
 
+    raw_outcome = payload.get("terminal_outcome")
+    if raw_outcome not in (-1, 0, 1):
+        raise ValueError(f"{path}: invalid or missing terminal_outcome")
+    outcome = int(raw_outcome)
     final = states[-1]
     won = bool(final.get("battle_won"))
     lost = bool(final.get("battle_lost"))
-    if won == lost:
-        raise ValueError(f"{path}: rollout has no decisive terminal outcome")
-    outcome = 1 if won else -1
+    if (outcome == 1 and not (won and not lost)) or (
+        outcome == -1 and not (lost and not won)
+    ) or (outcome == 0 and (won or lost)):
+        raise ValueError(f"{path}: terminal outcome disagrees with final state")
     return AtaraxosRollout(
         path=path,
         policy_id=policy_id,
@@ -118,7 +126,7 @@ def validate_buffer(
     root: str | Path, *, workers: int = 0
 ) -> dict[str, int | str]:
     """Validate an entire round and return a compact human-loggable summary."""
-    games = wins = losses = steps = 0
+    games = wins = draws = losses = steps = 0
     policy_id: str | None = None
     paths = list(rollout_paths(root))
     if workers > 1 and len(paths) > 1:
@@ -140,6 +148,7 @@ def validate_buffer(
                 )
             games += 1
             wins += rollout.outcome == 1
+            draws += rollout.outcome == 0
             losses += rollout.outcome == -1
             steps += rollout.steps
     finally:
@@ -150,6 +159,7 @@ def validate_buffer(
     return {
         "games": games,
         "wins": wins,
+        "draws": draws,
         "losses": losses,
         "steps": steps,
         "policy_id": policy_id or "",

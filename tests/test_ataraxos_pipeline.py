@@ -16,7 +16,12 @@ os.environ.setdefault(
 
 from metamon.rl.ataraxos import JointNativePolicyDriver, NativeBehaviorDriver
 from metamon.rl.ataraxos_replay import load_rollout, validate_buffer
-from metamon.rl.ataraxos_update import ataraxos_loss
+from metamon.rl.ataraxos_update import (
+    _ema_update,
+    ataraxos_loss,
+    categorical_gae_targets,
+    power_schedule,
+)
 from metamon.env.vectorized.opponent import RandomBatchedOpponent
 
 
@@ -56,15 +61,16 @@ def _valid_payload(policy_id="sha256-test"):
         [[np.log(0.25), np.log(0.75), -70.0]], dtype=np.float32
     )
     return {
-        "ataraxos_collector_version": 1,
+        "ataraxos_collector_version": 2,
         "behavior_policy_id": policy_id,
+        "terminal_outcome": 1,
         "states": [
             {"battle_won": False, "battle_lost": False},
             {"battle_won": True, "battle_lost": False},
         ],
         "actions": [1, -1],
         "behavior_log_probs": log_probs.tolist(),
-        "behavior_values": [0.125],
+        "behavior_values": [[0.25, 0.125, 0.625]],
         "behavior_legal_masks": [[True, True, False]],
     }
 
@@ -87,6 +93,7 @@ class AtaraxosReplayTests(unittest.TestCase):
             summary = validate_buffer(root)
             self.assertEqual(summary["games"], 1)
             self.assertEqual(summary["wins"], 1)
+            self.assertEqual(summary["draws"], 0)
             self.assertEqual(summary["policy_id"], "sha256-test")
 
     def test_rejects_illegal_recorded_action(self):
@@ -96,6 +103,18 @@ class AtaraxosReplayTests(unittest.TestCase):
             path = self._write(Path(tmp), "bad.json.lz4", payload)
             with self.assertRaisesRegex(ValueError, "stored action is illegal"):
                 load_rollout(path)
+
+    def test_accepts_natural_draw_but_rejects_mislabeled_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = _valid_payload()
+            payload["terminal_outcome"] = 0
+            payload["states"][-1]["battle_won"] = False
+            path = self._write(Path(tmp), "draw.json.lz4", payload)
+            self.assertEqual(load_rollout(path).outcome, 0)
+            payload["terminal_outcome"] = -1
+            bad = self._write(Path(tmp), "bad.json.lz4", payload)
+            with self.assertRaisesRegex(ValueError, "disagrees"):
+                load_rollout(bad)
 
     def test_rejects_mixed_behavior_policies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,7 +160,8 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         actions, log_probs, values, legal = driver.act(obs)
         np.testing.assert_array_equal(actions, np.asarray([2, 1]))
         self.assertEqual(log_probs.shape, (2, 3))
-        self.assertEqual(values.shape, (2,))
+        self.assertEqual(values.shape, (2, 3))
+        self.assertTrue(np.allclose(values.sum(-1), 1.0))
         np.testing.assert_array_equal(legal, ~obs["illegal_actions"])
         self.assertTrue(np.allclose(np.exp(log_probs).sum(-1), 1.0))
         self.assertTrue(np.all(np.exp(log_probs)[~legal] <= 1e-8))
@@ -179,7 +199,8 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(actions, np.asarray([2, 1]))
         self.assertEqual(log_probs.shape, (2, 3))
-        self.assertEqual(values.shape, (2,))
+        self.assertEqual(values.shape, (2, 3))
+        self.assertTrue(np.allclose(values.sum(-1), 1.0))
         np.testing.assert_array_equal(legal, ~eval_obs["illegal_actions"])
         self.assertTrue(driver.has_prefetched_actions(opponent_active))
         np.testing.assert_array_equal(
@@ -198,6 +219,54 @@ class NativeBehaviorDriverTests(unittest.TestCase):
 
 
 class AtaraxosUpdateTests(unittest.TestCase):
+    def test_original_power_schedule_and_parameter_only_ema(self):
+        self.assertEqual(power_schedule(0.5, 0, 1.1, 5e-6, 1e-4), 1e-4)
+        self.assertEqual(power_schedule(0.05, 0, 0.3, 0.001, 0.1), 0.05)
+        updated = _ema_update(
+            {"weight": torch.tensor([1.0]), "spectral_u": torch.tensor([1.0])},
+            {"weight": torch.tensor([3.0]), "spectral_u": torch.tensor([5.0])},
+            {"weight"},
+            0.5,
+        )
+        torch.testing.assert_close(updated["weight"], torch.tensor([2.0]))
+        torch.testing.assert_close(updated["spectral_u"], torch.tensor([5.0]))
+
+    def test_complete_game_gae_and_categorical_td_targets(self):
+        old_values = torch.tensor(
+            [[[0.60, 0.0, 0.40], [0.20, 0.0, 0.80]]], dtype=torch.float32
+        )
+        advantages, targets = categorical_gae_targets(
+            old_values,
+            torch.tensor([1.0]),
+            torch.tensor([[True, True]]),
+            gae_lambda=0.5,
+            td_lambda=0.8,
+        )
+        torch.testing.assert_close(advantages, torch.tensor([[1.0, 0.4]]))
+        torch.testing.assert_close(
+            targets,
+            torch.tensor([[[0.04, 0.0, 0.96], [0.0, 0.0, 1.0]]]),
+        )
+
+    def test_categorical_targets_respect_each_padded_length(self):
+        old_values = torch.tensor(
+            [
+                [[0.5, 0.0, 0.5], [0.4, 0.0, 0.6]],
+                [[0.7, 0.0, 0.3], [0.0, 0.0, 0.0]],
+            ]
+        )
+        advantages, targets = categorical_gae_targets(
+            old_values,
+            torch.tensor([1.0, -1.0]),
+            torch.tensor([[True, True], [True, False]]),
+            gae_lambda=0.5,
+            td_lambda=0.8,
+        )
+        torch.testing.assert_close(advantages[1], torch.tensor([-0.6, 0.0]))
+        torch.testing.assert_close(
+            targets[1], torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        )
+
     def test_identity_policy_has_unit_ratio_and_zero_kl(self):
         old_probs = torch.tensor(
             [[[0.25, 0.75, 0.0], [0.60, 0.40, 0.0]]], dtype=torch.float32
@@ -214,13 +283,18 @@ class AtaraxosUpdateTests(unittest.TestCase):
             value_logits=value_logits,
             actions=torch.tensor([[1, 0]]),
             old_log_probs=old_log,
-            old_values=torch.tensor([[0.1, 0.3]]),
+            old_value_probs=torch.tensor(
+                [[[0.45, 0.0, 0.55], [0.35, 0.0, 0.65]]]
+            ),
+            legal=torch.tensor([[[True, True, False], [True, True, False]]]),
             outcomes=torch.tensor([1.0]),
             valid=torch.tensor([[True, True]]),
-            clip_ratio=0.1,
-            value_coef=0.5,
-            entropy_coef=0.0,
-            kl_coef=0.05,
+            clip_ratio=0.2,
+            value_coef=1.0,
+            magnet_coef=0.05,
+            kl_coef=0.1,
+            gae_lambda=0.5,
+            td_lambda=0.8,
         )
         self.assertAlmostEqual(float(metrics["ratio_mean"]), 1.0, places=6)
         self.assertAlmostEqual(float(metrics["behavior_kl"]), 0.0, places=6)

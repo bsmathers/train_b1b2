@@ -1,6 +1,6 @@
 # Ataraxos native self-play infrastructure
 
-This is the native collection, conservative policy/value update, and sequential
+This is the native collection, Ataraxos policy/value update, and sequential
 round-orchestration layer for the next online stage.
 
 ## What is implemented
@@ -10,19 +10,29 @@ round-orchestration layer for the next online stage.
 - Both players use batched transformer inference and independent persistent
   RL2/KV state. Self-play shares the read-only policy weights in GPU memory.
 - Each recorded decision contains the committed action, exact behavior log
-  probabilities, legal-action mask, scalar W/L value, and immutable behavior
-  checkpoint identity.
-- Only decisive games enter an Ataraxos round. Time-limited or otherwise
-  unresolved games are excluded rather than counted as losses.
+  probabilities, legal-action mask, complete categorical W/L/D distribution,
+  and immutable behavior checkpoint identity—not only the scalar
+  `P(win) - P(loss)` projection.
+- Only terminal games enter an Ataraxos round. Natural simulator draws receive
+  the draw target; time-limited or otherwise unfinished games are excluded
+  rather than mislabeled as draws or losses.
 - Replay compression runs in a bounded writer pool and is flushed before a
   round is validated.
 - A completed round is rejected if probability mass, legality, action
   alignment, outcomes, or behavior-policy identity are inconsistent.
 - Physical player side alternates across rounds by default.
 - Round summaries and progress logs are plain text.
-- The reference learner replays complete recurrent trajectories, verifies the
+- The learner replays complete recurrent trajectories, verifies the
   pre-update policy against the exact stored behavior probabilities, and then
-  applies clipped PPO plus categorical W/L/D value learning.
+  applies unnormalized GAE(0.5), categorical TD(0.8), clipped PPO(0.2), forward
+  behavior KL, and the scheduled uniform-policy magnet.
+- Every valid decision has equal weight. There is one pass per rollout round,
+  no advantage filtering or normalization, AdamW has zero weight decay, and
+  gradients are clipped at 0.267.
+- Learning-rate and magnet coefficients follow the original power schedules.
+  Optimizer, schedule iteration, and parameter-only EMA(0.999) state persist
+  atomically across rounds. Live SigmaReparam buffers are copied into EMA
+  checkpoints instead of averaged.
 - Checkpoints and round/update summaries are published atomically.
 
 ## One collection round
@@ -50,8 +60,13 @@ The round can be inspected without loading a model:
 ```
 
 Rerunning an interrupted round validates the existing files, verifies that
-their behavior-policy hash matches, and collects only the missing decisive
+their behavior-policy hash matches, and collects only the missing terminal
 games.
+
+The replay contract is now collector version 2 because it stores categorical
+values and explicit terminal outcomes. Version-1 rounds cannot supply the new
+TD targets and are rejected; remove any old, not-yet-trained round directory
+before starting this learner.
 
 Set `PROFILE=1` to emit the collector and adapter timing breakdown. Profiling
 results and tuning guidance are in `docs/ATARAXOS_PERFORMANCE.md`.
@@ -81,8 +96,9 @@ checkpoint, then write that checkpoint's absolute path as one plain-text line
 to `ATARAXOS_NEXT_CHECKPOINT_FILE`.
 
 `ATARAXOS_PARENT_CHECKPOINT` is the policy path used to start collection. Its
-sibling optimizer state is resumed when present; every successful update writes
-the next policy and AdamW state together before publishing the next-policy path.
+sibling `ataraxos_training_state.pt` is resumed when present; every successful
+update writes the next policy, AdamW state, schedule iteration, and EMA together
+before publishing the next-policy path.
 
 Pipeline collection requires a positive temperature: actions must actually be
 sampled from the probability distribution stored beside them. Temperature zero
@@ -96,16 +112,27 @@ MODE=pipeline ROUNDS=10 \
   ./tools/run_ataraxos_cuda.sh
 ```
 
-The updater defaults are deliberately conservative: two passes over one
-policy-homogeneous round, trajectory-balanced terminal Monte Carlo advantages,
-PPO clipping at 0.10, W/L/D cross entropy, a small entropy bonus, exact behavior
-KL regularization, and gradient clipping. The values can be overridden with the
-`ATARAXOS_*` environment variables used by `tools/update_ataraxos_once.sh`.
+The updater defaults reproduce the original Ataraxos optimization settings,
+apart from deliberately retaining every decision: one pass, GAE lambda 0.5,
+categorical TD lambda 0.8, PPO clipping at 0.20, policy/value coefficients 1.0,
+forward behavior KL coefficient 0.10, zero weight decay, gradient clipping at
+0.267, and EMA decay 0.999. The original learning-rate schedule begins at its
+`1e-4` ceiling. That is aggressive for a pretrained Pokemon policy; use a small
+collect-update-evaluate promotion test before a long run. Set `ATARAXOS_LR` to
+override the schedule during such a safety comparison.
 
 ## Still deferred
 
+- live-game streaming and truncated bootstrap targets;
+- recording both player perspectives from each physical game (rounds alternate
+  the recorded physical side today);
 - historical-opponent sampling;
 - promotion/rejection gates for newly updated checkpoints.
+
+Live-game streaming cannot safely retain transformer KV caches across a weight
+update. It must first reconstruct each live history under the new policy. The
+complete-game implementation avoids mixing hidden states from different policy
+versions while using the same GAE/TD recurrences at terminal boundaries.
 
 Those are learning-policy decisions. The collector already supplies the exact
 on-policy data needed to implement and test them.

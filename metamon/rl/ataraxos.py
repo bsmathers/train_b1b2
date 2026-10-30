@@ -174,7 +174,6 @@ class NativeBehaviorDriver:
             else:
                 actions = probs.argmax(-1)
             value_probs = self.policy.wld_value(states[:, -1, :]).float().softmax(-1)
-            values = value_probs[:, 2] - value_probs[:, 0]
             legal = ~torch_obs["illegal_actions"][:, -1].bool()
             log_probs = torch.where(
                 probs > 0,
@@ -187,18 +186,18 @@ class NativeBehaviorDriver:
                 (
                     actions[:, None].float(),
                     log_probs,
-                    values[:, None],
+                    value_probs,
                     legal.float(),
                 ),
                 dim=-1,
             ).cpu().numpy()
         action_end = 1
         logp_end = action_end + self.action_dim
-        value_end = logp_end + 1
+        value_end = logp_end + 3
         return (
             packed[:, 0].astype(np.int64, copy=False),
             packed[:, action_end:logp_end],
-            packed[:, logp_end],
+            packed[:, logp_end:value_end],
             packed[:, value_end:].astype(bool, copy=False),
         )
 
@@ -355,7 +354,6 @@ class JointNativePolicyDriver:
             value_probs = self.policy.wld_value(
                 states[: self.lanes, -1, :]
             ).float().softmax(-1)
-            values = value_probs[:, 2] - value_probs[:, 0]
             legal = ~torch_obs["illegal_actions"][: self.lanes, -1].bool()
             log_probs = torch.where(
                 eval_probs > 0,
@@ -366,7 +364,7 @@ class JointNativePolicyDriver:
                 (
                     actions[: self.lanes, None].float(),
                     log_probs,
-                    values[:, None],
+                    value_probs,
                     legal.float(),
                     actions[self.lanes :, None].float(),
                 ),
@@ -374,7 +372,7 @@ class JointNativePolicyDriver:
             ).cpu().numpy()
         action_end = 1
         logp_end = action_end + self.action_dim
-        value_end = logp_end + 1
+        value_end = logp_end + 3
         legal_end = value_end + self.action_dim
         if opponent_active.any():
             self._prefetched_active = opponent_active.copy()
@@ -387,7 +385,7 @@ class JointNativePolicyDriver:
         return (
             packed[:, 0].astype(np.int64, copy=False),
             packed[:, action_end:logp_end],
-            packed[:, logp_end],
+            packed[:, logp_end:value_end],
             packed[:, value_end:legal_end].astype(bool, copy=False),
         )
 
@@ -710,6 +708,7 @@ def collect_round(
         "games": summary["games"],
         "games_collected_this_process": collected_games,
         "wins": summary["wins"],
+        "draws": summary["draws"],
         "losses": summary["losses"],
         "decisions": summary["steps"],
         "vector_steps": vector_steps,

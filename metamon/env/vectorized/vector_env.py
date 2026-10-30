@@ -162,7 +162,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._traj_behavior_log_probs: List[List[List[float]]] = [
             [] for _ in range(self.batched_envs)
         ]
-        self._traj_behavior_values: List[List[float]] = [
+        self._traj_behavior_values: List[List[List[float]]] = [
             [] for _ in range(self.batched_envs)
         ]
         self._traj_behavior_legal: List[List[List[bool]]] = [
@@ -427,7 +427,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._behavior_policy_id = policy_id
 
     def set_collection_game_target(self, target: int) -> None:
-        """Cap this collector at exactly ``target`` saved decisive games."""
+        """Cap this collector at exactly ``target`` saved terminal games."""
         target = int(target)
         if target <= 0:
             raise ValueError(f"collection target must be positive, got {target}")
@@ -467,16 +467,17 @@ class VectorizedShowdownEnv(gym.Env):
             )
         if legal.shape != expected:
             raise ValueError(f"behavior legal-mask shape {legal.shape}, expected {expected}")
-        if values.shape not in ((self.batched_envs,), (self.batched_envs, 1)):
+        if values.shape != (self.batched_envs, 3):
             raise ValueError(
                 f"behavior value shape {values.shape}, expected "
-                f"{(self.batched_envs,)} or {(self.batched_envs, 1)}"
+                f"{(self.batched_envs, 3)}"
             )
-        values = values.reshape(self.batched_envs)
         if not np.isfinite(log_probs).all() or not np.isfinite(values).all():
             raise ValueError("behavior metadata contains non-finite values")
-        if np.any(np.abs(values) > 1.0001):
-            raise ValueError("behavior values must be bounded to [-1, 1]")
+        if np.any(values < -1e-6) or not np.allclose(
+            values.sum(-1), 1.0, atol=2e-3, rtol=0.0
+        ):
+            raise ValueError("behavior W/L/D probabilities are invalid")
         probs = np.exp(log_probs)
         if not np.allclose(probs.sum(-1), 1.0, atol=2e-3, rtol=0.0):
             raise ValueError("behavior probabilities do not sum to one")
@@ -1108,7 +1109,7 @@ class VectorizedShowdownEnv(gym.Env):
                             self._pending_behavior_log_probs[i].tolist()
                         )
                         self._traj_behavior_values[i].append(
-                            float(self._pending_behavior_values[i])
+                            self._pending_behavior_values[i].tolist()
                         )
                         self._traj_behavior_legal[i].append(
                             self._pending_behavior_legal[i].tolist()
@@ -1143,7 +1144,12 @@ class VectorizedShowdownEnv(gym.Env):
                         truncated[i] or (lane.ended and lane.winner is None)
                     )
                     if self._saving:
-                        self._save_lane_outcome(i, new_eval)
+                        self._save_lane_outcome(
+                            i,
+                            new_eval,
+                            natural_draw=bool(lane.ended and lane.winner is None),
+                            truncated=bool(truncated[i]),
+                        )
                     self._start_lane(i)
                     restarted.append(i)
 
@@ -1181,12 +1187,21 @@ class VectorizedShowdownEnv(gym.Env):
             merged_info["draw"] = outcome_draw
         return batched_obs, rewards, terminated, truncated, merged_info
 
-    def _save_lane_outcome(self, i: int, final_state: UniversalState) -> None:
+    def _save_lane_outcome(
+        self,
+        i: int,
+        final_state: UniversalState,
+        *,
+        natural_draw: bool = False,
+        truncated: bool = False,
+    ) -> None:
         """Write a finished lane's trajectory and/or result log (parsed-replay format)."""
         if final_state.battle_won:
             result = "WIN"
         elif final_state.battle_lost:
             result = "LOSS"
+        elif natural_draw and not truncated:
+            result = "DRAW"
         else:
             result = "UNRESOLVED"
         battle_id = "".join(str(random.randint(0, 9)) for _ in range(10))
@@ -1230,8 +1245,11 @@ class VectorizedShowdownEnv(gym.Env):
                     raise RuntimeError("Ataraxos behavior policy id was not set")
                 output_json.update(
                     {
-                        "ataraxos_collector_version": 1,
+                        "ataraxos_collector_version": 2,
                         "behavior_policy_id": self._behavior_policy_id,
+                        "terminal_outcome": {"LOSS": -1, "DRAW": 0, "WIN": 1}[
+                            result
+                        ],
                         "behavior_log_probs": self._traj_behavior_log_probs[i],
                         "behavior_values": self._traj_behavior_values[i],
                         "behavior_legal_masks": self._traj_behavior_legal[i],
@@ -1239,7 +1257,11 @@ class VectorizedShowdownEnv(gym.Env):
                 )
             path = os.path.join(self.save_trajectories_to, filename)
             self._submit_trajectory_write(path, output_json)
-            if self._collection_game_target is not None and result in ("WIN", "LOSS"):
+            if self._collection_game_target is not None and result in (
+                "WIN",
+                "LOSS",
+                "DRAW",
+            ):
                 self._collection_games_saved += 1
 
         if self.save_results_to is not None:

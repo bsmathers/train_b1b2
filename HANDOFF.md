@@ -23,7 +23,7 @@ Updated: 2026-10-30
 The checkout contains uncommitted Ataraxos learner completion work:
 
 - `metamon/env/vectorized/vector_env.py` has behavior-metadata recording,
-  exact decisive-game quotas, and bounded asynchronous replay writing changes;
+  exact terminal-game quotas, and bounded asynchronous replay writing changes;
 - `metamon/rl/ataraxos_replay.py` defines and validates the on-policy replay
   contract;
 - `metamon/rl/ataraxos.py` is the native collector and sequential round
@@ -224,24 +224,27 @@ The next online stage should preserve the current actor plus W/L/D head and use
 native self-play. Infrastructure requirements are:
 
 1. immutable behavior-policy checkpoint per collection round;
-2. exact per-decision behavior log probabilities, scalar W/L value, legal mask,
+2. exact per-decision behavior log probabilities, categorical W/L/D value,
+   legal mask,
    committed action, terminal outcome, and policy identity;
 3. one batched inference call per side/decision wave and one packed GPU-to-host
    transfer for learner-side action plus metadata;
 4. persistent native lanes and KV state during a round;
 5. bounded asynchronous replay compression so disk writing does not stall the
    simulator;
-6. decisive-game quotas that reject unresolved time-limit games rather than
-   labelling them losses;
+6. terminal-game quotas that retain true draws while rejecting unresolved
+   time-limit games rather than labelling them losses;
 7. a fully validated FIFO/round boundary before any update consumes it; and
 8. a synchronous update hook that keeps the learner replaceable without
    changing collector plumbing.
 
-The collector satisfies the requirements above. The included reference learner
-uses terminal Monte Carlo advantages, trajectory-balanced clipped PPO,
-categorical W/L/D cross entropy, exact behavior KL, entropy regularization, and
-gradient clipping. AdamW state persists across rounds. Before any optimizer
-step it replays complete recurrent
+The collector satisfies the complete-game form of these requirements. Collector
+version 2 stores full W/L/D behavior probabilities. The learner uses
+unnormalized GAE(0.5), categorical TD(0.8), clipped PPO(0.2), forward
+`KL(live || behavior)`, the scheduled uniform magnet, equal per-decision
+weighting, zero weight decay, gradient clipping at 0.267, and one pass per
+round. AdamW, schedule iteration, and parameter-only EMA(0.999) state persist
+across rounds. Before any optimizer step it replays complete recurrent
 trajectories and rejects the round if the reconstructed actor distribution does
 not match the stored behavior distribution.
 
@@ -286,6 +289,9 @@ games/minute. Set `JOINT_INFERENCE=0` for the separate-forward fallback.
 
 Still deliberately unresolved:
 
+- streaming unfinished games and rebuilding live KV histories after updates;
+- saving both player perspectives from each game (the saved side alternates by
+  round now);
 - historical-opponent sampling and checkpoint promotion gates;
 - performance profiling at production CUDA scale; and
 - a destructive-write/failure-injection test for asynchronous replay output.
@@ -313,7 +319,7 @@ game logs, run logs, flattened dataset configs, and the exact git commit.
 
 ## Immediate safe next steps
 
-1. Run a small CUDA collect-update round (for example 16 lanes and 32 decisive
+1. Run a small CUDA collect-update round (for example 16 lanes and 32 terminal
    games) and confirm initial behavior KL remains near zero with BF16.
 2. Add a fixed-anchor evaluation/promotion gate before a long multi-round run.
 3. Add historical-opponent sampling after the current-policy path is stable.
