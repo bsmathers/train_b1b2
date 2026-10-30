@@ -12,6 +12,7 @@ import argparse
 import math
 import os
 import random
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,9 +94,7 @@ def _load_trajectories(replay_dir: Path, model) -> list[UpdateTrajectory]:
                 data=data,
                 behavior_log_probs=torch.from_numpy(rollout.behavior_log_probs),
                 behavior_values=torch.from_numpy(rollout.behavior_values),
-                behavior_legal_masks=torch.from_numpy(
-                    rollout.behavior_legal_masks
-                ),
+                behavior_legal_masks=torch.from_numpy(rollout.behavior_legal_masks),
                 outcome=rollout.outcome,
                 path=raw_path,
             )
@@ -125,9 +124,7 @@ def _pad_metadata(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     longest = max(sample.steps for sample in samples)
     action_dim = samples[0].behavior_log_probs.shape[-1]
-    old_log = torch.full(
-        (len(samples), longest, action_dim), -70.0, device=device
-    )
+    old_log = torch.full((len(samples), longest, action_dim), -70.0, device=device)
     old_value = torch.zeros((len(samples), longest, 3), device=device)
     valid = torch.zeros((len(samples), longest), dtype=torch.bool, device=device)
     legal = torch.zeros(
@@ -166,9 +163,9 @@ def categorical_gae_targets(
     lengths = valid.sum(1)
     if torch.any(lengths < 1):
         raise ValueError("empty trajectory in Ataraxos update")
-    terminal = F.one_hot(
-        (outcomes.long() + 1).clamp(0, 2), num_classes=3
-    ).to(old_value_probs.dtype)
+    terminal = F.one_hot((outcomes.long() + 1).clamp(0, 2), num_classes=3).to(
+        old_value_probs.dtype
+    )
     next_advantage = old_value_probs.new_zeros((old_value_probs.shape[0],))
     next_target = terminal
     for step in range(old_value_probs.shape[1] - 1, -1, -1):
@@ -242,6 +239,10 @@ def ataraxos_loss(
     behavior_kl = _decision_mean(kl_steps, valid)
     entropy_steps = -(new_probs * new_log_probs).sum(-1)
     entropy = _decision_mean(entropy_steps, valid)
+    # Verify the critic as well as the actor before any on-policy update.
+    behavior_value_l1 = _decision_mean(
+        (value_logits.float().softmax(-1) - old_value_probs).abs().sum(-1), valid
+    )
     legal_count = legal.sum(-1).clamp_min(1).to(new_probs.dtype)
     magnet_steps = (new_probs * new_log_probs).sum(-1) + legal_count.log()
     magnet_kl = _decision_mean(magnet_steps, valid)
@@ -253,6 +254,7 @@ def ataraxos_loss(
         "policy_loss": policy_loss.detach(),
         "value_loss": value_loss.detach(),
         "behavior_kl": behavior_kl.detach(),
+        "behavior_value_l1": behavior_value_l1.detach(),
         "magnet_kl": magnet_kl.detach(),
         "entropy": entropy.detach(),
         "clip_fraction": clip_fraction.detach(),
@@ -305,9 +307,7 @@ def _forward_loss(
         )
         distribution = policy.actor(
             states,
-            straight_from_obs={
-                key: obs[key] for key in policy.pass_obs_keys_to_actor
-            },
+            straight_from_obs={key: obs[key] for key in policy.pass_obs_keys_to_actor},
         )
         probs = distribution.probs[..., -1, :].float()[:, : valid.shape[1]]
         new_log = torch.where(
@@ -394,6 +394,64 @@ def _length_bucket_order(items, rng: random.Random, bucket_size: int):
     return [item for bucket in buckets for item in bucket]
 
 
+def _decision_batches(items, target_decisions: int, min_trajectories: int = 1):
+    """Pack whole recurrent histories into nearly fixed-decision update groups.
+
+    Do not split an episode into individual states: the transformer must replay
+    the complete prefix for every decision. One oversized history is one group.
+    """
+    if target_decisions < 1 or min_trajectories < 1:
+        raise ValueError("decision budget and min_trajectories must be positive")
+    groups = []
+    group = []
+    count = 0
+    for item in items:
+        n = item.steps
+        if n < 1:
+            raise ValueError("empty player trajectory")
+        if (
+            group
+            and len(group) >= min_trajectories
+            and abs(count - target_decisions) <= abs(count + n - target_decisions)
+        ):
+            groups.append(group)
+            group, count = [], 0
+        group.append(item)
+        count += n
+        if count >= target_decisions and len(group) >= min_trajectories:
+            groups.append(group)
+            group, count = [], 0
+    if group:
+        if groups and (count < target_decisions // 2 or len(group) < min_trajectories):
+            groups[-1].extend(group)
+        else:
+            groups.append(group)
+    return groups
+
+
+def _rank_decision_groups(ordered, target_decisions: int, world_size: int, rank: int):
+    """Identical update count on every DDP rank; balance decisions across ranks.
+
+    DDP averages rank gradients, so callers weight each local decision by its
+    fraction of the *global* update group's decision count.
+    """
+    groups = _decision_batches(
+        ordered, target_decisions * world_size, min_trajectories=world_size
+    )
+    output = []
+    for group in groups:
+        shards = [[] for _ in range(world_size)]
+        weights = [0] * world_size
+        for item in sorted(group, key=lambda row: row.steps, reverse=True):
+            destination = min(range(world_size), key=lambda i: weights[i])
+            shards[destination].append(item)
+            weights[destination] += item.steps
+        if any(not shard for shard in shards):
+            raise RuntimeError("DDP update group has no trajectories on one rank")
+        output.append((shards[rank], sum(weights)))
+    return output
+
+
 def power_schedule(
     coefficient: float,
     iteration: int,
@@ -418,8 +476,10 @@ def _ema_update(
             and live.is_floating_point()
             and previous is not None
         ):
-            output[name] = previous.to(live.device, live.dtype).mul(decay).add(
-                live.detach(), alpha=1.0 - decay
+            output[name] = (
+                previous.to(live.device, live.dtype)
+                .mul(decay)
+                .add(live.detach(), alpha=1.0 - decay)
             )
         else:
             output[name] = live.detach().clone()
@@ -514,24 +574,38 @@ def update(args) -> Path:
     # Before changing a single weight, verify that replaying the complete
     # recurrent inputs recovers the behavior distribution that was collected.
     initial_kl_sum = 0.0
-    initial_batches = 0
+    initial_value_l1_sum = 0.0
+    initial_decisions = 0
     with torch.no_grad():
-        # All ranks evaluate a disjoint shard, then reduce the exact mean.
+        # Weight the safety check by decisions, not variable-length histories.
         for samples in _batches(trajectories[rank::world_size], args.batch_size):
             _, metrics = learner(*_prepare_batch(samples, device))
-            initial_kl_sum += float(metrics["behavior_kl"].cpu())
-            initial_batches += 1
+            n = sum(sample.steps for sample in samples)
+            initial_kl_sum += float(metrics["behavior_kl"].cpu()) * n
+            initial_value_l1_sum += float(metrics["behavior_value_l1"].cpu()) * n
+            initial_decisions += n
     if distributed:
         totals = torch.tensor(
-            [initial_kl_sum, float(initial_batches)], device=device
+            [initial_kl_sum, initial_value_l1_sum, float(initial_decisions)],
+            device=device,
+            dtype=torch.float64,
         )
         torch.distributed.all_reduce(totals)
-        initial_kl_sum, initial_batches = totals.tolist()
-    initial_kl = initial_kl_sum / max(initial_batches, 1)
+        initial_kl_sum, initial_value_l1_sum, initial_decisions = totals.tolist()
+    initial_kl = initial_kl_sum / max(initial_decisions, 1)
+    initial_value_l1 = initial_value_l1_sum / max(initial_decisions, 1)
     if not math.isfinite(initial_kl) or initial_kl > args.max_initial_kl:
         raise RuntimeError(
             f"replayed policy does not match behavior policy: KL={initial_kl:.6g} "
             f"> {args.max_initial_kl:.6g}"
+        )
+    if (
+        not math.isfinite(initial_value_l1)
+        or initial_value_l1 > args.max_initial_value_l1
+    ):
+        raise RuntimeError(
+            f"replayed W/L/D values do not match behavior predictions: "
+            f"L1={initial_value_l1:.6g} > {args.max_initial_value_l1:.6g}"
         )
 
     optimizer = torch.optim.AdamW(
@@ -547,31 +621,53 @@ def update(args) -> Path:
     rng = random.Random(args.seed)
     final_metrics: dict[str, float] = {}
     optimizer_steps = 0
+    decisions_per_update = []
     for epoch in range(args.update_epochs):
         order = _length_bucket_order(
             trajectories, rng, max(args.batch_size * world_size * 8, 32)
         )
-        per_rank = math.ceil(len(order) / world_size)
-        padded_size = per_rank * world_size
-        repeats = math.ceil(padded_size / len(order))
-        padded = (order * repeats)[:padded_size]
-        rank_order = padded[rank * per_rank : (rank + 1) * per_rank]
-        for samples in _batches(rank_order, args.batch_size):
+        update_groups = _rank_decision_groups(
+            order, args.target_batch_decisions, world_size, rank
+        )
+        for samples_for_rank, global_decisions in update_groups:
             optimizer.zero_grad(set_to_none=True)
-            loss, metrics = learner(*_prepare_batch(samples, device))
-            if not torch.isfinite(loss):
-                raise RuntimeError("Ataraxos update produced a non-finite loss")
-            loss.backward()
+            metrics_accum: dict[str, float] = {}
+            local_decisions = sum(sample.steps for sample in samples_for_rank)
+            if not local_decisions:
+                raise RuntimeError("empty decision-budget update")
+            microbatches = list(_batches(samples_for_rank, args.batch_size))
+            for micro_index, samples in enumerate(microbatches):
+                # DDP must synchronize exactly once per optimizer step even if
+                # ranks have different numbers of recurrent microbatches.
+                sync = not distributed or micro_index == len(microbatches) - 1
+                context = nullcontext() if sync else learner.no_sync()
+                with context:
+                    loss, metrics = learner(*_prepare_batch(samples, device))
+                    if not torch.isfinite(loss):
+                        raise RuntimeError("Ataraxos update produced a non-finite loss")
+                    micro_decisions = sum(sample.steps for sample in samples)
+                    # DDP averages gradients across ranks. The world_size factor
+                    # recovers an exact global per-decision mean in that reduction.
+                    weight = world_size * micro_decisions / global_decisions
+                    (loss * weight).backward()
+                for key, value in metrics.items():
+                    metrics_accum[key] = metrics_accum.get(key, 0.0) + (
+                        float(value.detach().cpu()) * micro_decisions / local_decisions
+                    )
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 policy.parameters(), args.max_grad_norm
             )
             optimizer.step()
             optimizer_steps += 1
-            final_metrics = {key: float(value.cpu()) for key, value in metrics.items()}
+            decisions_per_update.append(global_decisions)
+            final_metrics = metrics_accum
             final_metrics["grad_norm"] = float(grad_norm.detach().float().cpu())
         if rank == 0:
             print(
                 f"[AtaraxosUpdate] epoch={epoch} steps={optimizer_steps} "
+                f"decisions={sum(item.steps for item in trajectories)} "
+                f"mean_decisions_per_update="
+                f"{sum(decisions_per_update) / max(len(decisions_per_update), 1):.1f} "
                 f"loss={final_metrics['loss']:.6f} "
                 f"kl={final_metrics['behavior_kl']:.6f} "
                 f"ratio={final_metrics['ratio_mean']:.6f}",
@@ -620,6 +716,11 @@ def update(args) -> Path:
         "decisions": sum(item.steps for item in trajectories),
         "update_epochs": args.update_epochs,
         "optimizer_steps": optimizer_steps,
+        "target_batch_decisions": args.target_batch_decisions,
+        "min_decisions_per_update": min(decisions_per_update),
+        "max_decisions_per_update": max(decisions_per_update),
+        "mean_decisions_per_update": f"{sum(decisions_per_update) / len(decisions_per_update):.2f}",
+        "decisions_per_update": ",".join(str(n) for n in decisions_per_update),
         "training_iteration": update_iteration,
         "learning_rate": f"{learning_rate:.10g}",
         "magnet_coefficient": f"{magnet_coef:.10g}",
@@ -631,6 +732,7 @@ def update(args) -> Path:
         "distributed_world_size": world_size,
         "compiled": bool(args.compile and device.type == "cuda"),
         "initial_behavior_kl": f"{initial_kl:.8f}",
+        "initial_behavior_value_l1": f"{initial_value_l1:.8f}",
     }
     summary.update({key: f"{value:.8f}" for key, value in final_metrics.items()})
     _write_text(args.summary_file, summary)
@@ -661,7 +763,13 @@ def main() -> None:
         help="Compile the learner graph on CUDA (disable for debugging).",
     )
     parser.add_argument("--update-epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Maximum full histories per GPU microbatch",
+    )
+    parser.add_argument("--target-batch-decisions", type=int, default=400)
     parser.add_argument("--max-games", type=int, default=0)
     parser.add_argument("--training-iteration", type=int)
     parser.add_argument("--learning-rate", type=float)
@@ -683,15 +791,14 @@ def main() -> None:
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--max-grad-norm", type=float, default=0.267)
     parser.add_argument("--max-initial-kl", type=float, default=0.02)
+    parser.add_argument("--max-initial-value-l1", type=float, default=0.05)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--seed", type=int, default=20261030)
     args = parser.parse_args()
 
     round_dir = Path(os.environ.get("ATARAXOS_ROUND_DIR", ".")).resolve()
     replay_value = args.replay_dir or os.environ.get("ATARAXOS_REPLAY_DIR")
-    checkpoint_value = args.checkpoint or os.environ.get(
-        "ATARAXOS_BEHAVIOR_CHECKPOINT"
-    )
+    checkpoint_value = args.checkpoint or os.environ.get("ATARAXOS_BEHAVIOR_CHECKPOINT")
     parent_value = args.parent_checkpoint or os.environ.get(
         "ATARAXOS_PARENT_CHECKPOINT"
     )
@@ -714,9 +821,7 @@ def main() -> None:
         "ATARAXOS_ARCHITECTURE_RUN_NAME"
     )
     if args.temperature is None:
-        args.temperature = float(
-            os.environ.get("ATARAXOS_BEHAVIOR_TEMPERATURE", "1.0")
-        )
+        args.temperature = float(os.environ.get("ATARAXOS_BEHAVIOR_TEMPERATURE", "1.0"))
     args.output_checkpoint = Path(
         args.output_checkpoint or round_dir / "checkpoints" / "policy_after_update.pt"
     ).resolve()
@@ -728,11 +833,11 @@ def main() -> None:
     if not args.checkpoint.is_file():
         parser.error(f"--checkpoint is not a file: {args.checkpoint}")
     if not args.parent_checkpoint.is_file():
+        parser.error(f"--parent-checkpoint is not a file: {args.parent_checkpoint}")
+    if min(args.update_epochs, args.batch_size, args.target_batch_decisions) < 1:
         parser.error(
-            f"--parent-checkpoint is not a file: {args.parent_checkpoint}"
+            "update-epochs, batch-size and target-batch-decisions must be positive"
         )
-    if min(args.update_epochs, args.batch_size) < 1:
-        parser.error("update-epochs and batch-size must be positive")
     if args.max_games < 0:
         parser.error("max-games must be non-negative")
     if args.training_iteration is not None and args.training_iteration < 0:
@@ -776,6 +881,8 @@ def main() -> None:
         parser.error("max-grad-norm must be finite and positive")
     if not math.isfinite(args.max_initial_kl) or args.max_initial_kl < 0:
         parser.error("max-initial-kl must be finite and non-negative")
+    if not math.isfinite(args.max_initial_value_l1) or args.max_initial_value_l1 < 0:
+        parser.error("max-initial-value-l1 must be finite and non-negative")
     if not math.isfinite(args.temperature) or args.temperature <= 0:
         parser.error(
             "temperature must be positive; deterministic argmax rollouts are "

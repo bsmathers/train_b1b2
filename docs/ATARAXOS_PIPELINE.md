@@ -31,9 +31,7 @@ round-orchestration layer for the next online stage.
   pre-update policy against the exact stored behavior probabilities, and then
   applies unnormalized GAE(0.5), categorical TD(0.8), clipped PPO(0.2), forward
   behavior KL, and the scheduled uniform-policy magnet.
-- Every valid decision has equal weight. There is one pass per rollout round,
-  no advantage filtering or normalization, AdamW has zero weight decay, and
-  gradients are clipped at 0.267.
+- Each optimizer update weights all valid decisions equally over accumulated recurrent microbatches. There is one pass per rollout round, no advantage filtering or normalization, AdamW has zero weight decay, and gradients clip at 0.267.
 - Learning-rate and magnet coefficients follow the original power schedules.
   Optimizer, schedule iteration, and parameter-only EMA(0.999) state persist
   atomically across rounds. Live SigmaReparam buffers are copied into EMA
@@ -67,11 +65,9 @@ replay shards before learning. `LANES` is per process. Start a 3090 profile at
 `COLLECTOR_SHARDS=2 LANES=16 SIM_WORKERS=1`, then compare 1, 2 and 4 shards;
 do not assume more processes help once CUDA inference becomes saturated.
 
-By default each round collects two terminal games per lane: 128 games for 64
-lanes. At the observed roughly 50 decisions per saved POV trajectory, this is
-approximately 100 new decisions per lane and makes one schedule iteration much
-closer to upstream Ataraxos. Set `GAMES` explicitly to override the estimate;
-the collector reports the actual decision count in every round summary.
+By default each round targets 80,000 **valid decisions from completed games** and then drains all in-flight battles without starting replacements. With roughly 50 decisions per POV trajectory, this is approximately 800 games, 1,600 trajectories, and 200 optimizer updates at 400 decisions per update. Set `TARGET_DECISIONS` to adjust; `TARGET_DECISIONS=0 GAMES=128` restores the old exact-game quota. The actual decision count may exceed the target during draining and is logged per round.
+
+`ATARAXOS_TARGET_BATCH_DECISIONS=400` sets the target valid decisions per optimizer step; `ATARAXOS_BATCH_SIZE=4` is the maximum number of recurrent trajectories in a GPU microbatch. Gradient accumulation weights each microbatch by its valid decisions, so short games do not get more weight. Initial replay validation now also checks W/L/D value distributions, with `ATARAXOS_MAX_INITIAL_VALUE_L1=0.05` default.
 
 The round can be inspected without loading a model:
 
@@ -175,15 +171,11 @@ still supplies exact on-policy data for complete-game updates.
 
 ## Remaining differences from upstream Ataraxos
 
-- Upstream keeps games alive and updates after about 100 decisions per player
-  and environment. This implementation finishes games, then approximates that
-  cadence with two terminal games per lane.
+- Upstream keeps games alive across updates after about 100 decisions per player and environment. This implementation instead finishes games and drains in-flight games at a completed-decision target, avoiding live-KV reconstruction and truncated bootstrap.
 - The original filters to roughly the top quartile of absolute advantages. We
   intentionally retain all decisions, as requested, so actor/value/regularizer
   gradient balance will not be identical.
-- Pokemon's recurrent transformer must replay complete sequences; upstream
-  Stratego batches individual information states across environments. Batch
-  size and optimizer-noise scale are therefore not directly transferable.
+- Pokemon's recurrent transformer replays complete sequences; upstream Stratego batches single information states. Effective decision-count minibatches approximately match Ataraxos's post-filter 400 decisions, but their memory and computational costs differ.
 - Upstream's evaluation manager uses its own Stratego population and rating
   regime. This implementation provides the same promotion-management boundary
   but defaults to a fixed native TaurosV0 safety gate.

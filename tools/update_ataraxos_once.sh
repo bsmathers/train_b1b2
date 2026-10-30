@@ -33,6 +33,7 @@ exec "${LAUNCH[@]}" \
     --mixed-precision "${MIXED_PRECISION:-bf16}" \
     --update-epochs "${ATARAXOS_UPDATE_EPOCHS:-1}" \
     --batch-size "${ATARAXOS_BATCH_SIZE:-4}" \
+    --target-batch-decisions "${ATARAXOS_TARGET_BATCH_DECISIONS:-400}" \
     --lr-coefficient "${ATARAXOS_LR_COEFFICIENT:-0.5}" \
     --lr-decay "${ATARAXOS_LR_DECAY:-1.1}" \
     --lr-floor "${ATARAXOS_LR_FLOOR:-5e-6}" \
@@ -50,4 +51,5 @@ exec "${LAUNCH[@]}" \
     --ema-decay "${ATARAXOS_EMA_DECAY:-0.999}" \
     --max-grad-norm "${ATARAXOS_MAX_GRAD_NORM:-0.267}" \
     --max-initial-kl "${ATARAXOS_MAX_INITIAL_KL:-0.02}" \
+    --max-initial-value-l1 "${ATARAXOS_MAX_INITIAL_VALUE_L1:-0.05}" \
     "${OVERRIDES[@]}"
