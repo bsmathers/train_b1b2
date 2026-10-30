@@ -15,6 +15,7 @@ def clean_name(name: str) -> str:
     return "".join(char for char in name if char.isalnum()).lower()
 
 
+@lru_cache(2**13)
 def pokemon_name(name: str) -> str:
     return clean_name(name).strip()
 
@@ -34,6 +35,7 @@ def _cleanup_move_id(move_id: str) -> str:
         return move_id
 
 
+@lru_cache(2**13)
 def move_name(name: str) -> str:
     return _cleanup_move_id(clean_no_numbers(name)).strip()
 

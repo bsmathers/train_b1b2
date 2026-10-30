@@ -179,7 +179,10 @@ def consistent_pokemon_order(pokemon):
     elif isinstance(pokemon[0], str):
         key = lambda p: pokemon_name(p)
     elif isinstance(pokemon[0], UniversalPokemon):
-        key = lambda p: pokemon_name(p.name)
+        # UniversalPokemon names are canonical ids already. Re-normalizing
+        # every name at every decision used to account for millions of Python
+        # calls in a short native rollout.
+        key = lambda p: p.name
     elif isinstance(pokemon[0], ReplayPokemon):
         key = lambda p: pokemon_name(p.name)
     else:
@@ -201,7 +204,8 @@ def consistent_move_order(moves):
     elif isinstance(moves[0], str):
         key = lambda m: move_name(m)
     elif isinstance(moves[0], UniversalMove):
-        key = lambda m: move_name(m.name)
+        # UniversalMove snapshots store the canonical Metamon move id.
+        key = lambda m: m.name
     elif isinstance(moves[0], ReplayMove):
         key = lambda m: move_name(m.name)
     else:
@@ -1183,9 +1187,11 @@ class DefaultObservationSpace(ObservationSpace):
         }
 
     def _get_move_string_features(self, move: UniversalMove, active: bool) -> list[str]:
-        out = [clean_name(move.name)]
+        # These fields were normalized while building UniversalMove. Avoid
+        # repeating string cleanup in the hottest observation loop.
+        out = [move.name]
         if active:
-            out += [clean_name(move.move_type), clean_name(move.category)]
+            out += [move.move_type, move.category]
         return out
 
     def _get_move_pad_string(self, active: bool) -> list[str]:

@@ -57,7 +57,7 @@ def default_action_legal_indices(state, request):
     elif not state.forced_switch:
         move_options = consistent_move_order(state.player_active_pokemon.moves)
         for index, move in enumerate(move_options[:4]):
-            if move_name(move.name) in valid_moves:
+            if move.name in valid_moves:
                 legal.append(index)
                 if state.can_tera:
                     legal.append(index + 9)
@@ -73,6 +73,6 @@ def default_action_legal_indices(state, request):
             valid_switches.add(pokemon_name(species))
     switch_pool = consistent_pokemon_order(state.available_switches)
     for index, pokemon in enumerate(switch_pool[:5]):
-        if pokemon_name(pokemon.name) in valid_switches:
+        if pokemon.name in valid_switches:
             legal.append(index + 4)
     return sorted(legal)

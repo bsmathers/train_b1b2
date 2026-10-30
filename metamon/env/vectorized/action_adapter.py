@@ -71,7 +71,7 @@ def action_idx_to_native_choice(
         moves = consistent_move_order(state.player_active_pokemon.moves)
         if idx >= len(moves):
             return None
-        selected = move_name(moves[idx].name)
+        selected = moves[idx].name
         for move in request_moves:
             if move.get("disabled", False):
                 continue
@@ -89,8 +89,8 @@ def action_idx_to_native_choice(
             return None
         selected = switches[switch_idx]
         target_ids = {
-            pokemon_name(selected.name),
-            pokemon_name(selected.base_species),
+            selected.name,
+            selected.base_species,
         }
         for slot, pokemon in enumerate(
             request.get("side", {}).get("pokemon", ()), start=1

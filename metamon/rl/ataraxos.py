@@ -28,6 +28,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -851,6 +852,224 @@ def collect_round(
     return round_dir, summary, immutable_checkpoint
 
 
+def _collect_child_command(
+    args,
+    checkpoint: Path,
+    output_dir: Path,
+    round_index: int,
+    games: int,
+    seed: int,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "metamon.rl.ataraxos",
+        "--mode",
+        "collect",
+        "--checkpoint",
+        str(checkpoint),
+        "--output-dir",
+        str(output_dir),
+        "--round",
+        str(round_index),
+        "--games",
+        str(games),
+        "--lanes",
+        str(args.lanes),
+        "--workers",
+        str(args.workers),
+        "--writer-workers",
+        str(args.writer_workers),
+        "--validation-workers",
+        "0",
+        "--battle-format",
+        args.battle_format,
+        "--team-set",
+        args.team_set,
+        "--side",
+        args.side,
+        "--temperature",
+        str(args.temperature),
+        "--turn-limit",
+        str(args.turn_limit),
+        "--seed",
+        str(seed),
+        "--device",
+        args.device,
+        "--mixed-precision",
+        args.mixed_precision,
+        "--progress-interval",
+        str(args.progress_interval),
+        "--max-vector-steps",
+        str(args.max_vector_steps),
+        "--evaluation-interval",
+        str(args.evaluation_interval),
+        "--architecture-save-root",
+        args.architecture_save_root,
+        "--architecture-run-name",
+        args.architecture_run_name,
+        "--joint-inference",
+    ]
+    if args.profile:
+        command.append("--profile")
+    return command
+
+
+def collect_sharded_round(
+    args, checkpoint: Path, round_index: int
+) -> tuple[Path, dict, Path]:
+    """Collect one round with independent adapter processes on one GPU.
+
+    Each process owns disjoint simulator lanes, recurrent state, RNG seed and
+    replay directory. All use the same content-addressed behavior checkpoint.
+    Replays are merged only after every shard validates successfully, avoiding
+    races in resume accounting and round summaries.
+    """
+    if args.collector_shards == 1:
+        return collect_round(args, checkpoint, round_index)
+
+    output_dir = Path(args.output_dir)
+    policy_id, immutable_checkpoint = _publish_behavior_checkpoint(
+        checkpoint, output_dir / "behavior_policies"
+    )
+    round_dir = output_dir / f"round_{round_index:06d}"
+    replay_root = round_dir / "replays"
+    existing_files = list((replay_root / args.battle_format).glob("*.json.lz4"))
+    existing_games = 0
+    if existing_files:
+        existing_summary = validate_buffer(
+            replay_root, workers=args.validation_workers
+        )
+        if int(existing_summary["games"]) % 2:
+            raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
+        if existing_summary["policy_id"] != policy_id:
+            raise RuntimeError(
+                f"round {round_index} already contains a different behavior policy"
+            )
+        existing_games = int(existing_summary["games"]) // 2
+        if existing_games >= args.games:
+            print(
+                f"[Ataraxos] round={round_index} already complete "
+                f"games={existing_games}",
+                flush=True,
+            )
+            return round_dir, existing_summary, immutable_checkpoint
+
+    remaining = args.games - existing_games
+    shard_count = min(args.collector_shards, remaining)
+    base, extra = divmod(remaining, shard_count)
+    quotas = [base + (index < extra) for index in range(shard_count)]
+    batch_root = (
+        output_dir
+        / "collector_shards"
+        / f"round_{round_index:06d}"
+        / f"batch_{existing_games:08d}"
+    )
+    batch_root.mkdir(parents=True, exist_ok=True)
+    processes: list[tuple[int, subprocess.Popen, object, Path]] = []
+    started = time.monotonic()
+    print(
+        f"[Ataraxos] round={round_index} launching {shard_count} collector "
+        f"processes, {args.lanes} lanes each, quotas={quotas}",
+        flush=True,
+    )
+    for shard_index, quota in enumerate(quotas):
+        shard_output = batch_root / f"shard_{shard_index:03d}"
+        shard_output.mkdir(parents=True, exist_ok=True)
+        shard_policy_root = shard_output / "behavior_policies"
+        if not shard_policy_root.exists():
+            shard_policy_root.symlink_to(output_dir / "behavior_policies", target_is_directory=True)
+        log_path = shard_output / "collector.log"
+        log_stream = log_path.open("a", encoding="utf-8")
+        command = _collect_child_command(
+            args,
+            immutable_checkpoint,
+            shard_output,
+            round_index,
+            quota,
+            args.seed + shard_index * 1_000_003,
+        )
+        process = subprocess.Popen(
+            command,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ.copy(),
+        )
+        processes.append((shard_index, process, log_stream, shard_output))
+
+    failures: list[str] = []
+    for shard_index, process, log_stream, shard_output in processes:
+        return_code = process.wait()
+        log_stream.close()
+        if return_code:
+            log_path = shard_output / "collector.log"
+            tail = "\n".join(
+                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+            )
+            failures.append(
+                f"shard {shard_index} exited {return_code}; log tail:\n{tail}"
+            )
+    if failures:
+        raise RuntimeError("parallel Ataraxos collection failed:\n" + "\n".join(failures))
+
+    replay_format_dir = replay_root / args.battle_format
+    replay_format_dir.mkdir(parents=True, exist_ok=True)
+    for shard_index, _, _, shard_output in processes:
+        shard_round = shard_output / f"round_{round_index:06d}"
+        shard_replays = shard_round / "replays"
+        shard_summary = validate_buffer(shard_replays, workers=0)
+        if shard_summary["policy_id"] != policy_id:
+            raise RuntimeError(f"collector shard {shard_index} used a different policy")
+        for source in (shard_replays / args.battle_format).glob("*.json.lz4"):
+            destination = replay_format_dir / source.name
+            if destination.exists():
+                raise RuntimeError(f"collector shard replay collision: {destination}")
+            os.replace(source, destination)
+
+    summary = validate_buffer(replay_root, workers=args.validation_workers)
+    physical_games = int(summary["games"]) // 2
+    if physical_games != args.games:
+        raise RuntimeError(
+            f"sharded round produced {physical_games} games, expected {args.games}"
+        )
+    elapsed = time.monotonic() - started
+    new_games = physical_games - existing_games
+    fields = {
+        "round": round_index,
+        "behavior_policy_id": policy_id,
+        "behavior_checkpoint": immutable_checkpoint,
+        "games": physical_games,
+        "player_trajectories": summary["games"],
+        "games_collected_this_process": new_games,
+        "wins": summary["wins"],
+        "draws": summary["draws"],
+        "losses": summary["losses"],
+        "decisions": summary["steps"],
+        "elapsed_seconds": f"{elapsed:.3f}",
+        "games_per_minute": f"{60.0 * new_games / max(elapsed, 1e-6):.3f}",
+        "device": args.device,
+        "host_logical_cpus": os.cpu_count() or 0,
+        "collector_shards": shard_count,
+        "lanes_per_shard": args.lanes,
+        "total_lanes": shard_count * args.lanes,
+        "simulator_workers_per_shard": args.workers,
+        "writer_workers_per_shard": args.writer_workers,
+        "team_set_mixture": args.team_set,
+        "behavior_temperature": args.temperature,
+        "engine": "native-zig-pkmn",
+        "update_status": "pending",
+    }
+    _write_round_text(round_dir / "round-summary.txt", fields)
+    print(
+        f"[Ataraxos] round={round_index} complete games={physical_games} "
+        f"player_trajectories={summary['games']} shards={shard_count} "
+        f"rate={fields['games_per_minute']} games/min",
+        flush=True,
+    )
+    return round_dir, summary, immutable_checkpoint
+
+
 def _run_update_hook(
     command: str,
     round_dir: Path,
@@ -944,6 +1163,15 @@ def main() -> None:
         help="Terminal games per round; zero chooses two games per lane.",
     )
     parser.add_argument("--lanes", type=int, default=64)
+    parser.add_argument(
+        "--collector-shards",
+        type=int,
+        default=1,
+        help=(
+            "Independent collector processes sharing one immutable behavior "
+            "checkpoint; each process owns --lanes simulator lanes."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--writer-workers", type=int, default=2)
     parser.add_argument("--battle-format", default="gen1ou")
@@ -1000,9 +1228,14 @@ def main() -> None:
         # player/environment. Local rollouts average about 50 recorded POV
         # decisions, so two terminal games per lane is the closest simple
         # cadence until live streaming is implemented.
-        args.games = 2 * args.lanes
+        args.games = 2 * args.lanes * args.collector_shards
     if min(
-        args.games, args.lanes, args.workers, args.rounds, args.evaluation_interval
+        args.games,
+        args.lanes,
+        args.collector_shards,
+        args.workers,
+        args.rounds,
+        args.evaluation_interval,
     ) < 1:
         parser.error("games, lanes, workers and rounds must be positive")
     if min(args.writer_workers, args.validation_workers) < 0 or args.temperature < 0:
@@ -1041,7 +1274,7 @@ def main() -> None:
         args.architecture_run_name = args.architecture_run_name or run_name
 
     if args.mode == "collect":
-        collect_round(args, checkpoint, args.round)
+        collect_sharded_round(args, checkpoint, args.round)
         return
 
     if not args.update_command:
@@ -1055,7 +1288,7 @@ def main() -> None:
         )
     for round_index in range(args.round, args.round + args.rounds):
         parent_checkpoint = checkpoint
-        round_dir, _, immutable_checkpoint = collect_round(
+        round_dir, _, immutable_checkpoint = collect_sharded_round(
             args, checkpoint, round_index
         )
         round_fields = _read_round_text(round_dir / "round-summary.txt")

@@ -60,6 +60,13 @@ LANES=64 SIM_WORKERS=4 \
 ./tools/run_ataraxos_cuda.sh
 ```
 
+The Python adapter is largely single-process bound. On CPU-rich GPU hosts,
+`COLLECTOR_SHARDS` runs independent adapter/simulator processes against the
+same immutable behavior checkpoint, then validates and merges their disjoint
+replay shards before learning. `LANES` is per process. Start a 3090 profile at
+`COLLECTOR_SHARDS=2 LANES=16 SIM_WORKERS=1`, then compare 1, 2 and 4 shards;
+do not assume more processes help once CUDA inference becomes saturated.
+
 By default each round collects two terminal games per lane: 128 games for 64
 lanes. At the observed roughly 50 decisions per saved POV trajectory, this is
 approximately 100 new decisions per lane and makes one schedule iteration much
