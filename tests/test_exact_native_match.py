@@ -30,6 +30,27 @@ class ExactNativeMatchTests(unittest.TestCase):
         second = [team_set.yield_team() for _ in range(12)]
         self.assertEqual(first, second)
 
+    def test_equal_team_set_mixture_is_reproducible_and_balanced(self):
+        from metamon.env.wrappers import TeamSet, TeamSetMixture
+
+        children = []
+        for prefix in ("good", "ladder"):
+            child = TeamSet.__new__(TeamSet)
+            child.team_files = [prefix]
+            child._packed_team_cache = {prefix: prefix.upper()}
+            child._most_recent_team_file = None
+            child._rng = random.Random()
+            children.append(child)
+        mixture = TeamSetMixture(children, weights=[1.0, 1.0])
+        mixture.seed(321)
+        first = [mixture.yield_team() for _ in range(1000)]
+        mixture.seed(321)
+        second = [mixture.yield_team() for _ in range(1000)]
+        self.assertEqual(first, second)
+        good = first.count("GOOD")
+        self.assertGreater(good, 450)
+        self.assertLess(good, 550)
+
     def test_result_requires_exact_disjoint_outcomes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "result.json"

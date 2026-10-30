@@ -162,6 +162,64 @@ class TeamSet(Teambuilder):
         self._rng.seed(seed)
 
 
+class TeamSetMixture(Teambuilder):
+    """Sample a source team set by weight, then sample one team from it.
+
+    Mixture weights apply to games, not to the combined number of team files.
+    Seeding is private and deterministic so native side-swapped evaluations and
+    asynchronous self-play lanes remain reproducible.
+    """
+
+    def __init__(
+        self,
+        team_sets: List[TeamSet],
+        weights: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        if not team_sets:
+            raise ValueError("TeamSetMixture requires at least one team set")
+        self.team_sets = list(team_sets)
+        self.weights = (
+            [1.0] * len(self.team_sets)
+            if weights is None
+            else [float(weight) for weight in weights]
+        )
+        if len(self.weights) != len(self.team_sets):
+            raise ValueError("team-set mixture weights have the wrong length")
+        if any(not np.isfinite(weight) or weight < 0 for weight in self.weights):
+            raise ValueError(
+                "team-set mixture weights must be finite and non-negative"
+            )
+        if sum(self.weights) <= 0:
+            raise ValueError("team-set mixture needs at least one positive weight")
+        self._rng = random.Random()
+        self._most_recent_team_file: Optional[str] = None
+        self._most_recent_team_set_index: Optional[int] = None
+
+    @property
+    def most_recent_team_file(self) -> Optional[str]:
+        return self._most_recent_team_file
+
+    @property
+    def most_recent_team_set_index(self) -> Optional[int]:
+        return self._most_recent_team_set_index
+
+    def seed(self, seed: Optional[int]) -> None:
+        self._rng.seed(seed)
+
+    def yield_team(self) -> str:
+        index = self._rng.choices(
+            range(len(self.team_sets)), weights=self.weights, k=1
+        )[0]
+        selected = self.team_sets[index]
+        if hasattr(selected, "seed"):
+            selected.seed(self._rng.getrandbits(64))
+        packed = selected.yield_team()
+        self._most_recent_team_set_index = index
+        self._most_recent_team_file = selected.most_recent_team_file
+        return packed
+
+
 class PokeAgentTeamSet(TeamSet):
     """
     The PokéAgent Challenge uses the June 2025 Showdown rules with bans on Zoroark/Zorua and Revival Blessing.
@@ -204,6 +262,18 @@ def get_metamon_teams(
             f"Cannot locate valid team directory for format {fmt} at path {path}"
         )
     return set_type(path, fmt)
+
+
+def get_metamon_team_mixture(
+    battle_format: str,
+    set_names: List[str],
+    weights: Optional[List[float]] = None,
+) -> TeamSetMixture:
+    """Load named team sets and mix them by per-game sampling weight."""
+    return TeamSetMixture(
+        [get_metamon_teams(battle_format, name) for name in set_names],
+        weights=weights,
+    )
 
 
 def _check_avatar(avatar: str):

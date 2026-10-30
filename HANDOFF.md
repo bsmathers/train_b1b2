@@ -248,6 +248,13 @@ across rounds. Before any optimizer step it replays complete recurrent
 trajectories and rejects the round if the reconstructed actor distribution does
 not match the stored behavior distribution.
 
+Ataraxos self-play now samples each side independently per game from an equal
+source-level mixture of `b1_good_807` and `hl_05_26`; the larger ladder set does
+not receive extra probability merely because it contains more files. The
+default complete-game round collects two games per lane (128 at 64 lanes), an
+empirical approximation to the original cadence of about 100 new decisions per
+player/environment. `GAMES` remains an explicit override.
+
 A local native-Zig smoke loaded the selected actor, collected exactly two
 decisive games (one win and one loss, 99 decisions), validated every stored row,
 reconstructed the behavior policy at KL `0.00000006`, completed one optimizer

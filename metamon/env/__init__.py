@@ -1,5 +1,6 @@
 from metamon.env.wrappers import (
     TeamSet,
+    TeamSetMixture,
     PokeAgentTeamSet,
     PokeEnvWrapper,
     BattleAgainstBaseline,
@@ -10,4 +11,5 @@ from metamon.env.wrappers import (
     PokeAgentLadder,
     ShowdownLadder,
     get_metamon_teams,
+    get_metamon_team_mixture,
 )

@@ -520,7 +520,7 @@ def collect_round(
     if args.profile:
         os.environ["METAMON_VEC_PROFILE"] = "1"
     _require_native_engine()
-    from metamon.env import get_metamon_teams
+    from metamon.env import get_metamon_team_mixture, get_metamon_teams
     from metamon.env.vectorized.opponent import AmagoBatchedOpponent
     from metamon.env.vectorized.vector_env import VectorizedShowdownEnv
 
@@ -600,12 +600,25 @@ def collect_round(
             mixed_precision=args.mixed_precision,
         )
     tick = time.perf_counter()
-    teams = get_metamon_teams(args.battle_format, args.team_set)
+    team_set_names = [
+        name.strip() for name in args.team_set.split(",") if name.strip()
+    ]
+    if not team_set_names:
+        raise ValueError("Ataraxos team-set mixture is empty")
+    teams = (
+        get_metamon_teams(args.battle_format, team_set_names[0])
+        if len(team_set_names) == 1
+        else get_metamon_team_mixture(
+            args.battle_format,
+            team_set_names,
+            weights=[1.0] * len(team_set_names),
+        )
+    )
     timed("team_load", tick)
     tick = time.perf_counter()
     env = VectorizedShowdownEnv(
         player_team_set=teams,
-        opponent_team_set=teams,
+        opponent_team_set=copy.deepcopy(teams),
         opponent=opponent,
         opponent_obs_space=model.observation_space,
         opponent_action_space=model.action_space,
@@ -725,6 +738,7 @@ def collect_round(
         "simulator_workers": args.workers,
         "writer_workers": args.writer_workers,
         "joint_inference": args.joint_inference,
+        "team_set_mixture": args.team_set,
         "behavior_temperature": args.temperature,
         "engine": "native-zig-pkmn",
         "update_status": "pending",
@@ -809,12 +823,21 @@ def main() -> None:
     parser.add_argument("--mode", choices=("collect", "pipeline", "inspect"), default="collect")
     parser.add_argument("--round", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=1)
-    parser.add_argument("--games", type=int, default=2000)
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=0,
+        help="Terminal games per round; zero chooses two games per lane.",
+    )
     parser.add_argument("--lanes", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--writer-workers", type=int, default=2)
     parser.add_argument("--battle-format", default="gen1ou")
-    parser.add_argument("--team-set", default="expert")
+    parser.add_argument(
+        "--team-set",
+        default="b1_good_807,hl_05_26",
+        help="One team set or a comma-separated uniform per-game mixture.",
+    )
     parser.add_argument(
         "--side",
         choices=("0", "1", "alternate"),
@@ -842,6 +865,12 @@ def main() -> None:
         help="Print collector and native-adapter timing breakdowns.",
     )
     args = parser.parse_args()
+    if args.games == 0:
+        # Complete-game approximation to Ataraxos's ~100 fresh decisions per
+        # player/environment. Local rollouts average about 50 recorded POV
+        # decisions, so two terminal games per lane is the closest simple
+        # cadence until live streaming is implemented.
+        args.games = 2 * args.lanes
     if min(args.games, args.lanes, args.workers, args.rounds) < 1:
         parser.error("games, lanes, workers and rounds must be positive")
     if min(args.writer_workers, args.validation_workers) < 0 or args.temperature < 0:

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from metamon.env import get_metamon_teams
+from metamon.env import get_metamon_team_mixture, get_metamon_teams
 from metamon.env.vectorized import RandomBatchedOpponent, VectorizedShowdownEnv
 from metamon.interface import (
     DefaultActionSpace,
@@ -84,7 +84,12 @@ def main() -> None:
     obs_space = DefaultObservationSpace()
     action_space = DefaultActionSpace()
     reward = DefaultShapedReward()
-    teams = get_metamon_teams(args.format, args.team_set)
+    team_names = [name.strip() for name in args.team_set.split(",") if name.strip()]
+    teams = (
+        get_metamon_teams(args.format, team_names[0])
+        if len(team_names) == 1
+        else get_metamon_team_mixture(args.format, team_names)
+    )
     if args.raw_team_files:
         _prepack_explicit_teams(teams, args.team_limit)
     elif args.team_limit is not None:

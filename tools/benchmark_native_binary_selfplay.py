@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from metamon.env import get_metamon_teams
+from metamon.env import get_metamon_team_mixture, get_metamon_teams
 from metamon.env.vectorized.native_binary import (
     RESULT_LOSE,
     RESULT_TIE,
@@ -56,7 +56,12 @@ def main() -> None:
     os.environ.setdefault("METAMON_VEC_PROFILE", "1")
 
     rng = random.Random(args.seed)
-    teams = get_metamon_teams(args.format, args.team_set)
+    team_names = [name.strip() for name in args.team_set.split(",") if name.strip()]
+    teams = (
+        get_metamon_teams(args.format, team_names[0])
+        if len(team_names) == 1
+        else get_metamon_team_mixture(args.format, team_names)
+    )
     teams.seed(args.seed)
     if args.raw_team_files:
         for file in teams.team_files:
