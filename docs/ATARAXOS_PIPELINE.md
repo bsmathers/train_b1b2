@@ -1,8 +1,7 @@
 # Ataraxos native self-play infrastructure
 
-This is the collection and round-orchestration layer for the next online stage.
-The policy/value update objective is deliberately not implemented yet. That
-choice can change without changing or weakening the rollout contract.
+This is the native collection, conservative policy/value update, and sequential
+round-orchestration layer for the next online stage.
 
 ## What is implemented
 
@@ -21,6 +20,10 @@ choice can change without changing or weakening the rollout contract.
   alignment, outcomes, or behavior-policy identity are inconsistent.
 - Physical player side alternates across rounds by default.
 - Round summaries and progress logs are plain text.
+- The reference learner replays complete recurrent trajectories, verifies the
+  pre-update policy against the exact stored behavior probabilities, and then
+  applies clipped PPO plus categorical W/L/D value learning.
+- Checkpoints and round/update summaries are published atomically.
 
 ## One collection round
 
@@ -65,7 +68,11 @@ The update process receives:
 ATARAXOS_ROUND_DIR
 ATARAXOS_REPLAY_DIR
 ATARAXOS_BEHAVIOR_CHECKPOINT
+ATARAXOS_PARENT_CHECKPOINT
 ATARAXOS_NEXT_CHECKPOINT_FILE
+ATARAXOS_ARCHITECTURE_SAVE_ROOT
+ATARAXOS_ARCHITECTURE_RUN_NAME
+ATARAXOS_BEHAVIOR_TEMPERATURE
 ```
 
 `ATARAXOS_BEHAVIOR_CHECKPOINT` is the immutable content-addressed copy that
@@ -73,17 +80,30 @@ actually generated the round. The updater must atomically publish its new
 checkpoint, then write that checkpoint's absolute path as one plain-text line
 to `ATARAXOS_NEXT_CHECKPOINT_FILE`.
 
-Example orchestration after an updater exists:
+`ATARAXOS_PARENT_CHECKPOINT` is the policy path used to start collection. Its
+sibling optimizer state is resumed when present; every successful update writes
+the next policy and AdamW state together before publishing the next-policy path.
+
+Pipeline collection requires a positive temperature: actions must actually be
+sampled from the probability distribution stored beside them. Temperature zero
+remains available for collect-only performance/evaluation runs, but those
+argmax trajectories are rejected as updater input by the default pipeline.
+
+The included updater is the default in pipeline mode:
 
 ```bash
-MODE=pipeline ROUNDS=10 UPDATE_COMMAND='/workspace/train_b1b2/tools/update_ataraxos_once.sh' \
+MODE=pipeline ROUNDS=10 \
   ./tools/run_ataraxos_cuda.sh
 ```
 
-## Intentionally deferred
+The updater defaults are deliberately conservative: two passes over one
+policy-homogeneous round, trajectory-balanced terminal Monte Carlo advantages,
+PPO clipping at 0.10, W/L/D cross entropy, a small entropy bonus, exact behavior
+KL regularization, and gradient clipping. The values can be overridden with the
+`ATARAXOS_*` environment variables used by `tools/update_ataraxos_once.sh`.
 
-- the advantage estimator and policy/value loss;
-- optimizer, clipping, KL control, and replay minibatch schedule;
+## Still deferred
+
 - historical-opponent sampling;
 - promotion/rejection gates for newly updated checkpoints.
 

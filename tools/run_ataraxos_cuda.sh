@@ -22,6 +22,7 @@ SIDE="${SIDE:-alternate}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 DEVICE="${DEVICE:-cuda:0}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+export PYTHON_BIN DEVICE MIXED_PRECISION
 PROFILE="${PROFILE:-0}"
 JOINT_INFERENCE="${JOINT_INFERENCE:-1}"
 TURN_LIMIT="${TURN_LIMIT:-200}"
@@ -37,9 +38,8 @@ if [ ! -f "${CHECKPOINT}" ]; then
     echo "ERROR: behavior checkpoint not found: ${CHECKPOINT}" >&2
     exit 1
 fi
-if [ "${MODE}" = "pipeline" ] && [ -z "${UPDATE_COMMAND:-}" ]; then
-    echo "ERROR: MODE=pipeline requires UPDATE_COMMAND" >&2
-    exit 1
+if [ "${MODE}" = "pipeline" ]; then
+    UPDATE_COMMAND="${UPDATE_COMMAND:-${ROOT_DIR}/tools/update_ataraxos_once.sh}"
 fi
 
 mkdir -p "${OUTPUT_DIR}"

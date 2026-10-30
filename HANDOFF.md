@@ -1,6 +1,6 @@
 # Train B1/B2 handoff
 
-Updated: 2026-10-27
+Updated: 2026-10-30
 
 ## Repository and current state
 
@@ -20,18 +20,19 @@ Updated: 2026-10-27
   this boundary (76,239 vs 6,229 games/min). The binary-to-model observation
   decoder remains unimplemented; do not claim model-facing equivalence yet.
 
-At the time this handoff was written, the checkout also contained unfinished,
-uncommitted Ataraxos infrastructure work:
+The checkout contains uncommitted Ataraxos learner completion work:
 
 - `metamon/env/vectorized/vector_env.py` has behavior-metadata recording,
   exact decisive-game quotas, and bounded asynchronous replay writing changes;
 - `metamon/rl/ataraxos_replay.py` defines and validates the on-policy replay
   contract;
-- `metamon/rl/ataraxos.py` is a native collection/update-hook skeleton.
+- `metamon/rl/ataraxos.py` is the native collector and sequential round
+  orchestrator;
+- `metamon/rl/ataraxos_update.py` is the conservative reference updater.
 
-That work has not yet received its smoke test or review and must not be pushed
-or used for training until it does. The intended architecture is documented in
-the Ataraxos section below.
+The focused contract tests and a real local collect-update-reload smoke test now
+pass. The intended architecture and remaining limitations are documented in the
+Ataraxos section below.
 
 ## Current model: unambiguous identity
 
@@ -233,15 +234,23 @@ native self-play. Infrastructure requirements are:
 6. decisive-game quotas that reject unresolved time-limit games rather than
    labelling them losses;
 7. a fully validated FIFO/round boundary before any update consumes it; and
-8. a synchronous update hook, with the eventual Ataraxos objective kept out of
-   the collector plumbing.
+8. a synchronous update hook that keeps the learner replaceable without
+   changing collector plumbing.
 
-The committed skeleton now satisfies the collection-side
-requirements above. Focused contract tests pass, and a real native-Zig smoke
-round loaded `policy_epoch_51.pt`, collected an exact two-decisive-game quota,
-flushed compressed replays, and validated every stored action and metadata row.
-`tools/run_ataraxos_cuda.sh` is the one-shot CUDA entry point and
-`docs/ATARAXOS_PIPELINE.md` documents the update-hook contract.
+The collector satisfies the requirements above. The included reference learner
+uses terminal Monte Carlo advantages, trajectory-balanced clipped PPO,
+categorical W/L/D cross entropy, exact behavior KL, entropy regularization, and
+gradient clipping. AdamW state persists across rounds. Before any optimizer
+step it replays complete recurrent
+trajectories and rejects the round if the reconstructed actor distribution does
+not match the stored behavior distribution.
+
+A local native-Zig smoke loaded the selected actor, collected exactly two
+decisive games (one win and one loss, 99 decisions), validated every stored row,
+reconstructed the behavior policy at KL `0.00000006`, completed one optimizer
+step, atomically published a 555-key checkpoint, and reloaded it strictly with
+all floating tensors finite. `tools/run_ataraxos_cuda.sh` is the one-shot entry
+point; `MODE=pipeline` now defaults to `tools/update_ataraxos_once.sh`.
 
 The first performance pass caches native legality results across observation
 and action translation, batches opponent feedback, and moves state conversion
@@ -277,7 +286,6 @@ games/minute. Set `JOINT_INFERENCE=0` for the separate-forward fallback.
 
 Still deliberately unresolved:
 
-- the actual policy/value update objective and advantage estimator;
 - historical-opponent sampling and checkpoint promotion gates;
 - performance profiling at production CUDA scale; and
 - a destructive-write/failure-injection test for asynchronous replay output.
@@ -305,7 +313,7 @@ game logs, run logs, flattened dataset configs, and the exact git commit.
 
 ## Immediate safe next steps
 
-1. Run a small CUDA round (for example 16 lanes and 32 decisive games) and
-   compare throughput with the prior native tournament runner.
-2. Define the self-play update rule, historical-opponent policy, and promotion
-   gate before enabling multi-round pipeline mode.
+1. Run a small CUDA collect-update round (for example 16 lanes and 32 decisive
+   games) and confirm initial behavior KL remains near zero with BF16.
+2. Add a fixed-anchor evaluation/promotion gate before a long multi-round run.
+3. Add historical-opponent sampling after the current-policy path is stable.

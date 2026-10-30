@@ -1,7 +1,8 @@
 """High-throughput native collection infrastructure for Ataraxos self-play.
 
-The update objective is intentionally a hook.  This module owns the contracts
-that must remain correct regardless of the eventual PPO/Ataraxos loss:
+The collector supports the repository's conservative reference updater as well
+as a replaceable synchronous update hook. This module owns the contracts that
+must remain correct regardless of later Ataraxos loss refinements:
 
 * every battle runs through the native Zig ``@pkmn/engine`` host;
 * both policies use batched transformer inference with persistent KV state;
@@ -725,6 +726,7 @@ def collect_round(
         "simulator_workers": args.workers,
         "writer_workers": args.writer_workers,
         "joint_inference": args.joint_inference,
+        "behavior_temperature": args.temperature,
         "engine": "native-zig-pkmn",
         "update_status": "pending",
     }
@@ -755,7 +757,16 @@ def collect_round(
     return round_dir, summary, immutable_checkpoint
 
 
-def _run_update_hook(command: str, round_dir: Path, checkpoint: Path) -> Path:
+def _run_update_hook(
+    command: str,
+    round_dir: Path,
+    checkpoint: Path,
+    *,
+    parent_checkpoint: Path,
+    architecture_save_root: str,
+    architecture_run_name: str,
+    behavior_temperature: float,
+) -> Path:
     next_file = round_dir / "next-checkpoint.txt"
     if next_file.exists():
         next_file.unlink()
@@ -765,7 +776,11 @@ def _run_update_hook(command: str, round_dir: Path, checkpoint: Path) -> Path:
             "ATARAXOS_ROUND_DIR": str(round_dir),
             "ATARAXOS_REPLAY_DIR": str(round_dir / "replays"),
             "ATARAXOS_BEHAVIOR_CHECKPOINT": str(checkpoint),
+            "ATARAXOS_PARENT_CHECKPOINT": str(parent_checkpoint),
             "ATARAXOS_NEXT_CHECKPOINT_FILE": str(next_file),
+            "ATARAXOS_ARCHITECTURE_SAVE_ROOT": architecture_save_root,
+            "ATARAXOS_ARCHITECTURE_RUN_NAME": architecture_run_name,
+            "ATARAXOS_BEHAVIOR_TEMPERATURE": str(behavior_temperature),
         }
     )
     subprocess.run(shlex.split(command), env=env, check=True)
@@ -852,13 +867,27 @@ def main() -> None:
     if not checkpoint.is_file():
         parser.error(f"checkpoint does not exist: {checkpoint}")
 
+    # Preserve architecture identity across pipeline rounds. Updated policies
+    # are published below round directories, where the standard AMAGO path can
+    # no longer be inferred from the checkpoint itself.
+    if args.architecture_save_root is None:
+        save_root, run_name = _infer_local_run(checkpoint)
+        args.architecture_save_root = str(save_root)
+        args.architecture_run_name = args.architecture_run_name or run_name
+
     if args.mode == "collect":
         collect_round(args, checkpoint, args.round)
         return
 
     if not args.update_command:
         parser.error("pipeline mode requires --update-command")
+    if args.temperature <= 0:
+        parser.error(
+            "pipeline mode requires temperature > 0 so actions are sampled "
+            "from the stored behavior distribution"
+        )
     for round_index in range(args.round, args.round + args.rounds):
+        parent_checkpoint = checkpoint
         round_dir, _, immutable_checkpoint = collect_round(
             args, checkpoint, round_index
         )
@@ -877,7 +906,13 @@ def main() -> None:
             )
             continue
         checkpoint = _run_update_hook(
-            args.update_command, round_dir, immutable_checkpoint
+            args.update_command,
+            round_dir,
+            immutable_checkpoint,
+            parent_checkpoint=parent_checkpoint,
+            architecture_save_root=args.architecture_save_root,
+            architecture_run_name=args.architecture_run_name,
+            behavior_temperature=args.temperature,
         )
         _update_round_text(
             round_dir / "round-summary.txt",

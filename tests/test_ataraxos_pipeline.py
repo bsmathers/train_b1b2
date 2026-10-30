@@ -16,6 +16,7 @@ os.environ.setdefault(
 
 from metamon.rl.ataraxos import JointNativePolicyDriver, NativeBehaviorDriver
 from metamon.rl.ataraxos_replay import load_rollout, validate_buffer
+from metamon.rl.ataraxos_update import ataraxos_loss
 from metamon.env.vectorized.opponent import RandomBatchedOpponent
 
 
@@ -194,6 +195,39 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         np.testing.assert_array_equal(
             driver.act(opponent_active, opponent_obs), np.asarray([1, 0])
         )
+
+
+class AtaraxosUpdateTests(unittest.TestCase):
+    def test_identity_policy_has_unit_ratio_and_zero_kl(self):
+        old_probs = torch.tensor(
+            [[[0.25, 0.75, 0.0], [0.60, 0.40, 0.0]]], dtype=torch.float32
+        )
+        old_log = torch.where(
+            old_probs > 0,
+            old_probs.clamp_min(1e-30).log(),
+            torch.full_like(old_probs, -70.0),
+        )
+        new_log = old_log.clone().requires_grad_(True)
+        value_logits = torch.zeros((1, 2, 3), requires_grad=True)
+        loss, metrics = ataraxos_loss(
+            new_log_probs=new_log,
+            value_logits=value_logits,
+            actions=torch.tensor([[1, 0]]),
+            old_log_probs=old_log,
+            old_values=torch.tensor([[0.1, 0.3]]),
+            outcomes=torch.tensor([1.0]),
+            valid=torch.tensor([[True, True]]),
+            clip_ratio=0.1,
+            value_coef=0.5,
+            entropy_coef=0.0,
+            kl_coef=0.05,
+        )
+        self.assertAlmostEqual(float(metrics["ratio_mean"]), 1.0, places=6)
+        self.assertAlmostEqual(float(metrics["behavior_kl"]), 0.0, places=6)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        self.assertIsNotNone(new_log.grad)
+        self.assertIsNotNone(value_logits.grad)
 
 
 if __name__ == "__main__":
