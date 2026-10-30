@@ -721,6 +721,7 @@ def update(args) -> Path:
         "min_decisions_per_update": min(decisions_per_update),
         "max_decisions_per_update": max(decisions_per_update),
         "mean_decisions_per_update": f"{sum(decisions_per_update) / len(decisions_per_update):.2f}",
+        "decisions_per_update": ",".join(str(n) for n in decisions_per_update),
         "training_iteration": update_iteration,
         "learning_rate": f"{learning_rate:.10g}",
         "magnet_coefficient": f"{magnet_coef:.10g}",
