@@ -60,9 +60,7 @@ class _FakePolicy(nn.Module):
 
 
 def _valid_payload(policy_id="sha256-test"):
-    log_probs = np.asarray(
-        [[np.log(0.25), np.log(0.75), -70.0]], dtype=np.float32
-    )
+    log_probs = np.asarray([[np.log(0.25), np.log(0.75), -70.0]], dtype=np.float32)
     return {
         "ataraxos_collector_version": 2,
         "behavior_policy_id": policy_id,
@@ -212,17 +210,12 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         opponent_metadata = driver.consume_policy_metadata(np.asarray([0, 1]))
         self.assertEqual([item[0] for item in opponent_metadata], [1, 0])
         self.assertTrue(
-            all(
-                np.isclose(np.exp(item[1]).sum(), 1.0)
-                for item in opponent_metadata
-            )
+            all(np.isclose(np.exp(item[1]).sum(), 1.0) for item in opponent_metadata)
         )
         self.assertFalse(driver.has_prefetched_actions(opponent_active))
 
         no_opponent = np.asarray([False, False])
-        driver.act_both(
-            eval_obs, np.asarray([True, True]), no_opponent, opponent_obs
-        )
+        driver.act_both(eval_obs, np.asarray([True, True]), no_opponent, opponent_obs)
         self.assertFalse(driver.has_prefetched_actions(no_opponent))
         np.testing.assert_array_equal(
             driver.act(opponent_active, opponent_obs), np.asarray([1, 0])
@@ -231,7 +224,6 @@ class NativeBehaviorDriverTests(unittest.TestCase):
             [item[0] for item in driver.consume_policy_metadata(np.asarray([0, 1]))],
             [1, 0],
         )
-
 
 
 class AtaraxosDecisionBudgetTests(unittest.TestCase):
@@ -267,10 +259,10 @@ class AtaraxosDecisionBudgetTests(unittest.TestCase):
         self.assertEqual(len(a), 100)
         for (r0, total0), (r1, total1) in zip(a, b):
             self.assertEqual(total0, total1)
-            self.assertEqual(
-                sum(item.steps for item in r0 + r1), total0
-            )
-        all_items = [item.ident for rank in (a, b) for group, _ in rank for item in group]
+            self.assertEqual(sum(item.steps for item in r0 + r1), total0)
+        all_items = [
+            item.ident for rank in (a, b) for group, _ in rank for item in group
+        ]
         self.assertEqual(sorted(all_items), list(range(1600)))
 
     def test_microbatch_weighting_matches_flat_decision_mean(self):
@@ -368,9 +360,7 @@ class AtaraxosUpdateTests(unittest.TestCase):
             value_logits=value_logits,
             actions=torch.tensor([[1, 0]]),
             old_log_probs=old_log,
-            old_value_probs=torch.tensor(
-                [[[0.45, 0.0, 0.55], [0.35, 0.0, 0.65]]]
-            ),
+            old_value_probs=torch.tensor([[[0.45, 0.0, 0.55], [0.35, 0.0, 0.65]]]),
             legal=torch.tensor([[[True, True, False], [True, True, False]]]),
             outcomes=torch.tensor([1.0]),
             valid=torch.tensor([[True, True]]),

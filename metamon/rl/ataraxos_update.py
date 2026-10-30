@@ -94,9 +94,7 @@ def _load_trajectories(replay_dir: Path, model) -> list[UpdateTrajectory]:
                 data=data,
                 behavior_log_probs=torch.from_numpy(rollout.behavior_log_probs),
                 behavior_values=torch.from_numpy(rollout.behavior_values),
-                behavior_legal_masks=torch.from_numpy(
-                    rollout.behavior_legal_masks
-                ),
+                behavior_legal_masks=torch.from_numpy(rollout.behavior_legal_masks),
                 outcome=rollout.outcome,
                 path=raw_path,
             )
@@ -126,9 +124,7 @@ def _pad_metadata(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     longest = max(sample.steps for sample in samples)
     action_dim = samples[0].behavior_log_probs.shape[-1]
-    old_log = torch.full(
-        (len(samples), longest, action_dim), -70.0, device=device
-    )
+    old_log = torch.full((len(samples), longest, action_dim), -70.0, device=device)
     old_value = torch.zeros((len(samples), longest, 3), device=device)
     valid = torch.zeros((len(samples), longest), dtype=torch.bool, device=device)
     legal = torch.zeros(
@@ -167,9 +163,9 @@ def categorical_gae_targets(
     lengths = valid.sum(1)
     if torch.any(lengths < 1):
         raise ValueError("empty trajectory in Ataraxos update")
-    terminal = F.one_hot(
-        (outcomes.long() + 1).clamp(0, 2), num_classes=3
-    ).to(old_value_probs.dtype)
+    terminal = F.one_hot((outcomes.long() + 1).clamp(0, 2), num_classes=3).to(
+        old_value_probs.dtype
+    )
     next_advantage = old_value_probs.new_zeros((old_value_probs.shape[0],))
     next_target = terminal
     for step in range(old_value_probs.shape[1] - 1, -1, -1):
@@ -311,9 +307,7 @@ def _forward_loss(
         )
         distribution = policy.actor(
             states,
-            straight_from_obs={
-                key: obs[key] for key in policy.pass_obs_keys_to_actor
-            },
+            straight_from_obs={key: obs[key] for key in policy.pass_obs_keys_to_actor},
         )
         probs = distribution.probs[..., -1, :].float()[:, : valid.shape[1]]
         new_log = torch.where(
@@ -418,8 +412,7 @@ def _decision_batches(items, target_decisions: int, min_trajectories: int = 1):
         if (
             group
             and len(group) >= min_trajectories
-            and abs(count - target_decisions)
-            <= abs(count + n - target_decisions)
+            and abs(count - target_decisions) <= abs(count + n - target_decisions)
         ):
             groups.append(group)
             group, count = [], 0
@@ -483,8 +476,10 @@ def _ema_update(
             and live.is_floating_point()
             and previous is not None
         ):
-            output[name] = previous.to(live.device, live.dtype).mul(decay).add(
-                live.detach(), alpha=1.0 - decay
+            output[name] = (
+                previous.to(live.device, live.dtype)
+                .mul(decay)
+                .add(live.detach(), alpha=1.0 - decay)
             )
         else:
             output[name] = live.detach().clone()
@@ -592,7 +587,8 @@ def update(args) -> Path:
     if distributed:
         totals = torch.tensor(
             [initial_kl_sum, initial_value_l1_sum, float(initial_decisions)],
-            device=device, dtype=torch.float64,
+            device=device,
+            dtype=torch.float64,
         )
         torch.distributed.all_reduce(totals)
         initial_kl_sum, initial_value_l1_sum, initial_decisions = totals.tolist()
@@ -603,7 +599,10 @@ def update(args) -> Path:
             f"replayed policy does not match behavior policy: KL={initial_kl:.6g} "
             f"> {args.max_initial_kl:.6g}"
         )
-    if not math.isfinite(initial_value_l1) or initial_value_l1 > args.max_initial_value_l1:
+    if (
+        not math.isfinite(initial_value_l1)
+        or initial_value_l1 > args.max_initial_value_l1
+    ):
         raise RuntimeError(
             f"replayed W/L/D values do not match behavior predictions: "
             f"L1={initial_value_l1:.6g} > {args.max_initial_value_l1:.6g}"
@@ -640,7 +639,7 @@ def update(args) -> Path:
             for micro_index, samples in enumerate(microbatches):
                 # DDP must synchronize exactly once per optimizer step even if
                 # ranks have different numbers of recurrent microbatches.
-                sync = (not distributed or micro_index == len(microbatches) - 1)
+                sync = not distributed or micro_index == len(microbatches) - 1
                 context = nullcontext() if sync else learner.no_sync()
                 with context:
                     loss, metrics = learner(*_prepare_batch(samples, device))
@@ -764,7 +763,12 @@ def main() -> None:
         help="Compile the learner graph on CUDA (disable for debugging).",
     )
     parser.add_argument("--update-epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=4, help="Maximum full histories per GPU microbatch")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Maximum full histories per GPU microbatch",
+    )
     parser.add_argument("--target-batch-decisions", type=int, default=400)
     parser.add_argument("--max-games", type=int, default=0)
     parser.add_argument("--training-iteration", type=int)
@@ -794,9 +798,7 @@ def main() -> None:
 
     round_dir = Path(os.environ.get("ATARAXOS_ROUND_DIR", ".")).resolve()
     replay_value = args.replay_dir or os.environ.get("ATARAXOS_REPLAY_DIR")
-    checkpoint_value = args.checkpoint or os.environ.get(
-        "ATARAXOS_BEHAVIOR_CHECKPOINT"
-    )
+    checkpoint_value = args.checkpoint or os.environ.get("ATARAXOS_BEHAVIOR_CHECKPOINT")
     parent_value = args.parent_checkpoint or os.environ.get(
         "ATARAXOS_PARENT_CHECKPOINT"
     )
@@ -819,9 +821,7 @@ def main() -> None:
         "ATARAXOS_ARCHITECTURE_RUN_NAME"
     )
     if args.temperature is None:
-        args.temperature = float(
-            os.environ.get("ATARAXOS_BEHAVIOR_TEMPERATURE", "1.0")
-        )
+        args.temperature = float(os.environ.get("ATARAXOS_BEHAVIOR_TEMPERATURE", "1.0"))
     args.output_checkpoint = Path(
         args.output_checkpoint or round_dir / "checkpoints" / "policy_after_update.pt"
     ).resolve()
@@ -833,11 +833,11 @@ def main() -> None:
     if not args.checkpoint.is_file():
         parser.error(f"--checkpoint is not a file: {args.checkpoint}")
     if not args.parent_checkpoint.is_file():
-        parser.error(
-            f"--parent-checkpoint is not a file: {args.parent_checkpoint}"
-        )
+        parser.error(f"--parent-checkpoint is not a file: {args.parent_checkpoint}")
     if min(args.update_epochs, args.batch_size, args.target_batch_decisions) < 1:
-        parser.error("update-epochs, batch-size and target-batch-decisions must be positive")
+        parser.error(
+            "update-epochs, batch-size and target-batch-decisions must be positive"
+        )
     if args.max_games < 0:
         parser.error("max-games must be non-negative")
     if args.training_iteration is not None and args.training_iteration < 0:

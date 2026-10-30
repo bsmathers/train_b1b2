@@ -171,9 +171,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._opp_traj_states: List[List[UniversalState]] = [
             [] for _ in range(self.batched_envs)
         ]
-        self._opp_traj_actions: List[List[int]] = [
-            [] for _ in range(self.batched_envs)
-        ]
+        self._opp_traj_actions: List[List[int]] = [[] for _ in range(self.batched_envs)]
         self._opp_traj_behavior_log_probs: List[List[List[float]]] = [
             [] for _ in range(self.batched_envs)
         ]
@@ -416,6 +414,7 @@ class VectorizedShowdownEnv(gym.Env):
         eval_team = self.player_team_set
         opp_team = self.opponent_team_set
         game_index = int(self._lane_game_counts[i])
+
         def seeded_player_spec(name, team, stream):
             # Key every team draw by model identity, lane, and game number.
             # This makes the 250 p1 and 250 p2 runs use identical paired teams
@@ -442,9 +441,7 @@ class VectorizedShowdownEnv(gym.Env):
         self._traj_behavior_log_probs[i] = []
         self._traj_behavior_values[i] = []
         self._traj_behavior_legal[i] = []
-        self._opp_traj_states[i] = [
-            self.lanes[i].universal_state(self.opp_side)
-        ]
+        self._opp_traj_states[i] = [self.lanes[i].universal_state(self.opp_side)]
         self._opp_traj_actions[i] = []
         self._opp_traj_behavior_log_probs[i] = []
         self._opp_traj_behavior_values[i] = []
@@ -481,7 +478,9 @@ class VectorizedShowdownEnv(gym.Env):
         """
         target = int(target)
         if target <= 0:
-            raise ValueError(f"collection decision target must be positive, got {target}")
+            raise ValueError(
+                f"collection decision target must be positive, got {target}"
+            )
         self._collection_game_target = None
         self._collection_decision_target = target
         self._collection_decisions_saved = 0
@@ -534,7 +533,9 @@ class VectorizedShowdownEnv(gym.Env):
                 f"behavior log-prob shape {log_probs.shape}, expected {expected}"
             )
         if legal.shape != expected:
-            raise ValueError(f"behavior legal-mask shape {legal.shape}, expected {expected}")
+            raise ValueError(
+                f"behavior legal-mask shape {legal.shape}, expected {expected}"
+            )
         if values.shape != (self.batched_envs, 3):
             raise ValueError(
                 f"behavior value shape {values.shape}, expected "
@@ -654,9 +655,7 @@ class VectorizedShowdownEnv(gym.Env):
                 )
             idx = int(self._rng.choice(legal)) if legal else idx
         if type(action_space) is DefaultActionSpace:
-            choice = action_idx_to_native_choice(
-                idx, state, lane.last_request[side]
-            )
+            choice = action_idx_to_native_choice(idx, state, lane.last_request[side])
             if os.environ.get("METAMON_NATIVE_VERIFY_FAST_CHOICE") == "1":
                 generic = action_idx_to_choice(
                     idx, lane.battle(side), lane.last_request[side]
@@ -672,7 +671,10 @@ class VectorizedShowdownEnv(gym.Env):
                 idx, lane.battle(side), lane.last_request[side]
             )
         if choice is None:
-            if self._ataraxos_metadata_enabled or os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1":
+            if (
+                self._ataraxos_metadata_enabled
+                or os.environ.get("METAMON_NATIVE_STRICT_ACTIONS") == "1"
+            ):
                 raise RuntimeError(
                     f"Cannot translate legal action lane={i} side={side} idx={idx}"
                 )
@@ -1006,9 +1008,7 @@ class VectorizedShowdownEnv(gym.Env):
             self._record_opp_rewards(opp_pending)
             pending = auto
 
-    def _record_opp_rewards(
-        self, opp_pending: List[tuple]
-    ) -> None:
+    def _record_opp_rewards(self, opp_pending: List[tuple]) -> None:
         if not opp_pending:
             return
         lanes = np.fromiter(
@@ -1016,9 +1016,7 @@ class VectorizedShowdownEnv(gym.Env):
         )
         actions = np.fromiter(
             (
-                self._committed_side_actions.get(
-                    (i, self.opp_side), int(used_idx)
-                )
+                self._committed_side_actions.get((i, self.opp_side), int(used_idx))
                 for i, used_idx, *_ in opp_pending
             ),
             dtype=np.int64,
@@ -1168,9 +1166,11 @@ class VectorizedShowdownEnv(gym.Env):
             opp_actions = (
                 self.opponent.act(
                     opp_active,
-                    []
-                    if self.opponent.has_prefetched_actions(opp_active)
-                    else self._opp_obs_list(opp_active),
+                    (
+                        []
+                        if self.opponent.has_prefetched_actions(opp_active)
+                        else self._opp_obs_list(opp_active)
+                    ),
                 )
                 if opp_active.any()
                 else None
@@ -1381,6 +1381,7 @@ class VectorizedShowdownEnv(gym.Env):
             save_training_trajectory = False
 
         if self.save_trajectories_to is not None and save_training_trajectory:
+
             def submit_pov(
                 *,
                 label: str,
@@ -1444,9 +1445,7 @@ class VectorizedShowdownEnv(gym.Env):
                 opponent_result = (
                     "DRAW"
                     if result == "DRAW"
-                    else "WIN"
-                    if result == "LOSS"
-                    else "LOSS"
+                    else "WIN" if result == "LOSS" else "LOSS"
                 )
                 submit_pov(
                     label="opponent",
@@ -1460,16 +1459,19 @@ class VectorizedShowdownEnv(gym.Env):
             if result in ("WIN", "LOSS", "DRAW"):
                 self._collection_games_saved += 1
                 if self._collection_decision_target is not None:
-                    self._collection_decisions_saved += (
-                        len(self._traj_actions[i]) + len(self._opp_traj_actions[i])
-                    )
-                    if self._collection_decisions_saved >= self._collection_decision_target:
+                    self._collection_decisions_saved += len(
+                        self._traj_actions[i]
+                    ) + len(self._opp_traj_actions[i])
+                    if (
+                        self._collection_decisions_saved
+                        >= self._collection_decision_target
+                    ):
                         self._collection_stop_restarts = True
 
         if self._ataraxos_metadata_enabled and result == "UNRESOLVED":
             self._collection_unresolved_games += 1
-            self._collection_unresolved_decisions += (
-                len(self._traj_actions[i]) + len(self._opp_traj_actions[i])
+            self._collection_unresolved_decisions += len(self._traj_actions[i]) + len(
+                self._opp_traj_actions[i]
             )
 
         if self.save_results_to is not None:
@@ -1489,9 +1491,7 @@ class VectorizedShowdownEnv(gym.Env):
                 state.to_dict() if hasattr(state, "to_dict") else state
                 for state in payload["states"]
             ]
-            encoded = json.dumps(serializable, separators=(",", ":")).encode(
-                "utf-8"
-            )
+            encoded = json.dumps(serializable, separators=(",", ":")).encode("utf-8")
             with lz4.frame.open(temp_path, "wb") as stream:
                 stream.write(encoded)
             os.replace(temp_path, path)
