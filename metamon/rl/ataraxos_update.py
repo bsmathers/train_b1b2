@@ -12,6 +12,7 @@ import argparse
 import math
 import os
 import random
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -635,15 +636,21 @@ def update(args) -> Path:
             local_decisions = sum(sample.steps for sample in samples_for_rank)
             if not local_decisions:
                 raise RuntimeError("empty decision-budget update")
-            for samples in _batches(samples_for_rank, args.batch_size):
-                loss, metrics = learner(*_prepare_batch(samples, device))
-                if not torch.isfinite(loss):
-                    raise RuntimeError("Ataraxos update produced a non-finite loss")
-                micro_decisions = sum(sample.steps for sample in samples)
-                # DDP averages gradients across ranks. The world_size factor
-                # recovers an exact global per-decision mean in that reduction.
-                weight = world_size * micro_decisions / global_decisions
-                (loss * weight).backward()
+            microbatches = list(_batches(samples_for_rank, args.batch_size))
+            for micro_index, samples in enumerate(microbatches):
+                # DDP must synchronize exactly once per optimizer step even if
+                # ranks have different numbers of recurrent microbatches.
+                sync = (not distributed or micro_index == len(microbatches) - 1)
+                context = nullcontext() if sync else learner.no_sync()
+                with context:
+                    loss, metrics = learner(*_prepare_batch(samples, device))
+                    if not torch.isfinite(loss):
+                        raise RuntimeError("Ataraxos update produced a non-finite loss")
+                    micro_decisions = sum(sample.steps for sample in samples)
+                    # DDP averages gradients across ranks. The world_size factor
+                    # recovers an exact global per-decision mean in that reduction.
+                    weight = world_size * micro_decisions / global_decisions
+                    (loss * weight).backward()
                 for key, value in metrics.items():
                     metrics_accum[key] = metrics_accum.get(key, 0.0) + (
                         float(value.detach().cpu()) * micro_decisions / local_decisions
