@@ -18,11 +18,14 @@ from metamon.rl.ataraxos import JointNativePolicyDriver, NativeBehaviorDriver
 from metamon.rl.ataraxos_replay import load_rollout, validate_buffer
 from metamon.rl.ataraxos_update import (
     _ema_update,
+    _decision_batches,
+    _rank_decision_groups,
     ataraxos_loss,
     categorical_gae_targets,
     power_schedule,
 )
 from metamon.env.vectorized.opponent import RandomBatchedOpponent
+from metamon.env.vectorized.vector_env import VectorizedShowdownEnv
 
 
 class _FakeTrajEncoder:
@@ -57,9 +60,7 @@ class _FakePolicy(nn.Module):
 
 
 def _valid_payload(policy_id="sha256-test"):
-    log_probs = np.asarray(
-        [[np.log(0.25), np.log(0.75), -70.0]], dtype=np.float32
-    )
+    log_probs = np.asarray([[np.log(0.25), np.log(0.75), -70.0]], dtype=np.float32)
     return {
         "ataraxos_collector_version": 2,
         "behavior_policy_id": policy_id,
@@ -209,17 +210,12 @@ class NativeBehaviorDriverTests(unittest.TestCase):
         opponent_metadata = driver.consume_policy_metadata(np.asarray([0, 1]))
         self.assertEqual([item[0] for item in opponent_metadata], [1, 0])
         self.assertTrue(
-            all(
-                np.isclose(np.exp(item[1]).sum(), 1.0)
-                for item in opponent_metadata
-            )
+            all(np.isclose(np.exp(item[1]).sum(), 1.0) for item in opponent_metadata)
         )
         self.assertFalse(driver.has_prefetched_actions(opponent_active))
 
         no_opponent = np.asarray([False, False])
-        driver.act_both(
-            eval_obs, np.asarray([True, True]), no_opponent, opponent_obs
-        )
+        driver.act_both(eval_obs, np.asarray([True, True]), no_opponent, opponent_obs)
         self.assertFalse(driver.has_prefetched_actions(no_opponent))
         np.testing.assert_array_equal(
             driver.act(opponent_active, opponent_obs), np.asarray([1, 0])
@@ -228,6 +224,75 @@ class NativeBehaviorDriverTests(unittest.TestCase):
             [item[0] for item in driver.consume_policy_metadata(np.asarray([0, 1]))],
             [1, 0],
         )
+
+
+class AtaraxosDecisionBudgetTests(unittest.TestCase):
+    @staticmethod
+    def trajectories(lengths):
+        return [SimpleNamespace(steps=n, ident=i) for i, n in enumerate(lengths)]
+
+    def test_400_decisions_means_200_updates_for_80000_states(self):
+        trajectories = self.trajectories([50] * 1600)
+        batches = _decision_batches(trajectories, 400)
+        self.assertEqual(len(batches), 200)
+        self.assertTrue(all(sum(item.steps for item in b) == 400 for b in batches))
+        self.assertEqual(
+            sorted(item.ident for batch in batches for item in batch),
+            list(range(1600)),
+        )
+
+    def test_variable_length_histories_preserved_and_never_dropped(self):
+        lengths = [10, 20, 190, 70, 200, 40, 85, 30, 300, 50, 45]
+        trajectories = self.trajectories(lengths)
+        batches = _decision_batches(trajectories, 400)
+        self.assertEqual(
+            sorted(item.ident for batch in batches for item in batch),
+            list(range(len(lengths))),
+        )
+        self.assertTrue(all(batch for batch in batches))
+
+    def test_ddp_groups_match_and_preserve_all_decisions(self):
+        trajectories = self.trajectories([50] * 1600)
+        a = _rank_decision_groups(trajectories, 400, 2, 0)
+        b = _rank_decision_groups(trajectories, 400, 2, 1)
+        self.assertEqual(len(a), len(b))
+        self.assertEqual(len(a), 100)
+        for (r0, total0), (r1, total1) in zip(a, b):
+            self.assertEqual(total0, total1)
+            self.assertEqual(sum(item.steps for item in r0 + r1), total0)
+        all_items = [
+            item.ident for rank in (a, b) for group, _ in rank for item in group
+        ]
+        self.assertEqual(sorted(all_items), list(range(1600)))
+
+    def test_microbatch_weighting_matches_flat_decision_mean(self):
+        # Two recurrent microbatches of different sizes. Every decision must
+        # retain equal gradient weight after accumulation.
+        weight = torch.tensor(1.0, requires_grad=True)
+        first = torch.tensor([2.0] * 30)
+        second = torch.tensor([3.0] * 370)
+        for data in (first, second):
+            (weight * data.mean() * (data.numel() / 400)).backward()
+        expected = torch.cat([first, second]).mean()
+        torch.testing.assert_close(weight.grad, expected)
+
+    def test_decision_collection_drains_inflight_lanes(self):
+        # Exercise target bookkeeping without constructing the native engine.
+        env = VectorizedShowdownEnv.__new__(VectorizedShowdownEnv)
+        env.batched_envs = 3
+        env._parked_lanes = np.zeros(3, dtype=bool)
+        env._collection_game_target = None
+        env._collection_games_saved = 0
+        env._collection_decision_target = None
+        env._collection_decisions_saved = 0
+        env._collection_stop_restarts = False
+        env.set_collection_decision_target(400)
+        self.assertFalse(env.collection_game_target_reached())
+        env._collection_decisions_saved = 440
+        env._collection_stop_restarts = True
+        self.assertFalse(env.collection_game_target_reached())
+        env._parked_lanes[:] = True
+        self.assertTrue(env.collection_game_target_reached())
 
 
 class AtaraxosUpdateTests(unittest.TestCase):
@@ -295,9 +360,7 @@ class AtaraxosUpdateTests(unittest.TestCase):
             value_logits=value_logits,
             actions=torch.tensor([[1, 0]]),
             old_log_probs=old_log,
-            old_value_probs=torch.tensor(
-                [[[0.45, 0.0, 0.55], [0.35, 0.0, 0.65]]]
-            ),
+            old_value_probs=torch.tensor([[[0.45, 0.0, 0.55], [0.35, 0.0, 0.65]]]),
             legal=torch.tensor([[[True, True, False], [True, True, False]]]),
             outcomes=torch.tensor([1.0]),
             valid=torch.tensor([[True, True]]),
@@ -310,6 +373,7 @@ class AtaraxosUpdateTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(metrics["ratio_mean"]), 1.0, places=6)
         self.assertAlmostEqual(float(metrics["behavior_kl"]), 0.0, places=6)
+        self.assertGreater(float(metrics["behavior_value_l1"]), 0.0)
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
         self.assertIsNotNone(new_log.grad)

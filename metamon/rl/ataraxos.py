@@ -149,7 +149,9 @@ class NativeBehaviorDriver:
     def _caster(self):
         enabled = self.device.type == "cuda" and self.mixed_precision != "no"
         dtype = torch.bfloat16 if self.mixed_precision == "bf16" else torch.float16
-        return torch.autocast(device_type=self.device.type, dtype=dtype, enabled=enabled)
+        return torch.autocast(
+            device_type=self.device.type, dtype=dtype, enabled=enabled
+        )
 
     def act(self, obs: dict[str, np.ndarray]):
         torch_obs = {
@@ -166,8 +168,7 @@ class NativeBehaviorDriver:
             dist = self.policy.actor(
                 states,
                 straight_from_obs={
-                    key: torch_obs[key]
-                    for key in self.policy.pass_obs_keys_to_actor
+                    key: torch_obs[key] for key in self.policy.pass_obs_keys_to_actor
                 },
             )
             probs = dist.probs[..., -1, :][:, -1, :].float()
@@ -185,15 +186,19 @@ class NativeBehaviorDriver:
             )
             # This is the only device synchronization in the evaluated policy's
             # decision path.  Four small results share one packed transfer.
-            packed = torch.cat(
-                (
-                    actions[:, None].float(),
-                    log_probs,
-                    value_probs,
-                    legal.float(),
-                ),
-                dim=-1,
-            ).cpu().numpy()
+            packed = (
+                torch.cat(
+                    (
+                        actions[:, None].float(),
+                        log_probs,
+                        value_probs,
+                        legal.float(),
+                    ),
+                    dim=-1,
+                )
+                .cpu()
+                .numpy()
+            )
         action_end = 1
         logp_end = action_end + self.action_dim
         value_end = logp_end + 3
@@ -244,9 +249,7 @@ class JointNativePolicyDriver:
         self.action_dim = int(action_dim)
         self.sample = bool(sample)
         self.mixed_precision = mixed_precision
-        self.rl2s = np.zeros(
-            (2 * self.lanes, self.action_dim + 1), dtype=np.float32
-        )
+        self.rl2s = np.zeros((2 * self.lanes, self.action_dim + 1), dtype=np.float32)
         self.time_idxs = np.zeros((2 * self.lanes,), dtype=np.int64)
         self.hidden_state = policy.traj_encoder.init_hidden_state(
             2 * self.lanes, device
@@ -324,8 +327,7 @@ class JointNativePolicyDriver:
             dist = self.policy.actor(
                 states,
                 straight_from_obs={
-                    key: torch_obs[key]
-                    for key in self.policy.pass_obs_keys_to_actor
+                    key: torch_obs[key] for key in self.policy.pass_obs_keys_to_actor
                 },
             )
             probs = dist.probs[..., -1, :][:, -1, :].float()
@@ -358,9 +360,9 @@ class JointNativePolicyDriver:
         )
         with torch.inference_mode(), self._caster():
             eval_probs = probs[: self.lanes]
-            all_value_probs = self.policy.wld_value(
-                states[:, -1, :]
-            ).float().softmax(-1)
+            all_value_probs = (
+                self.policy.wld_value(states[:, -1, :]).float().softmax(-1)
+            )
             all_legal = ~torch_obs["illegal_actions"][:, -1].bool()
             all_log_probs = torch.where(
                 probs > 0,
@@ -372,19 +374,23 @@ class JointNativePolicyDriver:
                 eval_probs.clamp_min(1e-30).log(),
                 torch.full_like(eval_probs, -70.0),
             )
-            packed = torch.cat(
-                (
-                    actions[: self.lanes, None].float(),
-                    log_probs,
-                    all_value_probs[: self.lanes],
-                    all_legal[: self.lanes].float(),
-                    actions[self.lanes :, None].float(),
-                    all_log_probs[self.lanes :],
-                    all_value_probs[self.lanes :],
-                    all_legal[self.lanes :].float(),
-                ),
-                dim=-1,
-            ).cpu().numpy()
+            packed = (
+                torch.cat(
+                    (
+                        actions[: self.lanes, None].float(),
+                        log_probs,
+                        all_value_probs[: self.lanes],
+                        all_legal[: self.lanes].float(),
+                        actions[self.lanes :, None].float(),
+                        all_log_probs[self.lanes :],
+                        all_value_probs[self.lanes :],
+                        all_legal[self.lanes :].float(),
+                    ),
+                    dim=-1,
+                )
+                .cpu()
+                .numpy()
+            )
         action_end = 1
         logp_end = action_end + self.action_dim
         value_end = logp_end + 3
@@ -400,16 +406,12 @@ class JointNativePolicyDriver:
                     int(packed[lane, opp_action_col]),
                     packed[lane, opp_log_start:opp_log_end].copy(),
                     packed[lane, opp_log_end:opp_value_end].copy(),
-                    packed[lane, opp_value_end:opp_legal_end].astype(
-                        bool, copy=True
-                    ),
+                    packed[lane, opp_value_end:opp_legal_end].astype(bool, copy=True),
                 )
             )
         if opponent_active.any():
             self._prefetched_active = opponent_active.copy()
-            self._prefetched_actions = packed[:, legal_end].astype(
-                np.int64, copy=False
-            )
+            self._prefetched_actions = packed[:, legal_end].astype(np.int64, copy=False)
         else:
             self._prefetched_active = None
             self._prefetched_actions = None
@@ -428,7 +430,9 @@ class JointNativePolicyDriver:
     def act(self, active: np.ndarray, obs_list: list[dict]) -> np.ndarray:
         if self._prefetched_active is not None:
             if not np.array_equal(active, self._prefetched_active):
-                raise RuntimeError("prefetched opponent active mask changed before step")
+                raise RuntimeError(
+                    "prefetched opponent active mask changed before step"
+                )
             actions = self._prefetched_actions
             self._prefetched_active = None
             self._prefetched_actions = None
@@ -447,17 +451,19 @@ class JointNativePolicyDriver:
                 probs.clamp_min(1e-30).log(),
                 torch.full_like(probs, -70.0),
             )
-            packed = torch.cat(
-                (actions[:, None].float(), log_probs, values, legal.float()), -1
-            ).cpu().numpy()
+            packed = (
+                torch.cat(
+                    (actions[:, None].float(), log_probs, values, legal.float()), -1
+                )
+                .cpu()
+                .numpy()
+            )
         for lane in np.flatnonzero(active):
             self._opponent_metadata[int(lane)].append(
                 (
                     int(packed[lane, 0]),
                     packed[lane, 1 : 1 + self.action_dim].copy(),
-                    packed[
-                        lane, 1 + self.action_dim : 4 + self.action_dim
-                    ].copy(),
+                    packed[lane, 1 + self.action_dim : 4 + self.action_dim].copy(),
                     packed[lane, 4 + self.action_dim :].astype(bool, copy=True),
                 )
             )
@@ -492,9 +498,7 @@ class JointNativePolicyDriver:
         self.rl2s[idx[valid], 1 + actions[valid]] = 1.0
 
     def observe_eval(self, rewards: np.ndarray, actions: np.ndarray) -> None:
-        self._observe_slice(
-            np.arange(self.lanes), rewards, actions, offset=0
-        )
+        self._observe_slice(np.arange(self.lanes), rewards, actions, offset=0)
 
     def observe(self, lane_idx: int, reward: float, action_idx: int) -> None:
         self.observe_batch(
@@ -506,9 +510,7 @@ class JointNativePolicyDriver:
     def observe_batch(
         self, lane_indices: np.ndarray, rewards: np.ndarray, action_indices: np.ndarray
     ) -> None:
-        self._observe_slice(
-            lane_indices, rewards, action_indices, offset=self.lanes
-        )
+        self._observe_slice(lane_indices, rewards, action_indices, offset=self.lanes)
 
     def _reset_slice(self, done: np.ndarray, offset: int) -> None:
         if not np.any(done):
@@ -540,7 +542,9 @@ class JointNativePolicyDriver:
             queue.clear()
 
 
-def _publish_behavior_checkpoint(checkpoint: Path, policy_root: Path) -> tuple[str, Path]:
+def _publish_behavior_checkpoint(
+    checkpoint: Path, policy_root: Path
+) -> tuple[str, Path]:
     policy_id = _checkpoint_identity(checkpoint)
     policy_root.mkdir(parents=True, exist_ok=True)
     published = policy_root / f"{policy_id}.pt"
@@ -576,9 +580,7 @@ def _update_round_text(path: Path, **updates: object) -> None:
     _write_round_text(path, fields)
 
 
-def collect_round(
-    args, checkpoint: Path, round_index: int
-) -> tuple[Path, dict, Path]:
+def collect_round(args, checkpoint: Path, round_index: int) -> tuple[Path, dict, Path]:
     profile: dict[str, float] = {}
 
     def timed(name: str, started_at: float) -> None:
@@ -607,28 +609,35 @@ def collect_round(
     existing = list((replay_root / args.battle_format).glob("*.json.lz4"))
     existing_games = 0
     existing_trajectories = 0
+    existing_decisions = 0
+    decision_mode = args.target_decisions > 0
     if existing:
-        existing_summary = validate_buffer(
-            replay_root, workers=args.validation_workers
-        )
+        existing_summary = validate_buffer(replay_root, workers=args.validation_workers)
         existing_trajectories = int(existing_summary["games"])
         if existing_trajectories % 2:
             raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
         existing_games = existing_trajectories // 2
+        existing_decisions = int(existing_summary["steps"])
         if existing_summary["policy_id"] != policy_id:
             raise RuntimeError(
                 f"round {round_index} already contains a different behavior policy"
             )
-        if existing_games >= args.games:
+        if (
+            existing_decisions >= args.target_decisions
+            if decision_mode
+            else existing_games >= args.games
+        ):
             print(
                 f"[Ataraxos] round={round_index} already complete "
-                f"games={existing_games} trajectories={existing_trajectories}",
+                f"games={existing_games} decisions={existing_decisions}",
                 flush=True,
             )
             return round_dir, existing_summary, immutable_checkpoint
-        remaining = args.games - existing_games
-    else:
-        remaining = args.games
+    remaining = (
+        args.target_decisions - existing_decisions
+        if decision_mode
+        else args.games - existing_games
+    )
     round_dir.mkdir(parents=True, exist_ok=True)
 
     tick = time.perf_counter()
@@ -671,9 +680,7 @@ def collect_round(
             mixed_precision=args.mixed_precision,
         )
     tick = time.perf_counter()
-    team_set_names = [
-        name.strip() for name in args.team_set.split(",") if name.strip()
-    ]
+    team_set_names = [name.strip() for name in args.team_set.split(",") if name.strip()]
     if not team_set_names:
         raise ValueError("Ataraxos team-set mixture is empty")
     teams = (
@@ -711,7 +718,10 @@ def collect_round(
     )
     timed("environment_construction", tick)
     env.set_behavior_policy_id(policy_id)
-    env.set_collection_game_target(remaining)
+    if decision_mode:
+        env.set_collection_decision_target(remaining)
+    else:
+        env.set_collection_game_target(remaining)
     started = time.monotonic()
     vector_steps = 0
     try:
@@ -742,7 +752,9 @@ def collect_round(
             tick = time.perf_counter()
             committed = np.asarray(
                 [
-                    env._committed_side_actions.get((lane, env.eval_side), actions[lane])
+                    env._committed_side_actions.get(
+                        (lane, env.eval_side), actions[lane]
+                    )
                     for lane in range(args.lanes)
                 ],
                 dtype=np.int64,
@@ -758,9 +770,15 @@ def collect_round(
             if vector_steps % args.progress_interval == 0:
                 elapsed = max(time.monotonic() - started, 1e-6)
                 games = env.collection_game_count()
+                progress = (
+                    f"decisions={existing_decisions + env.collection_decision_count()}/"
+                    f"{args.target_decisions} draining={env.collection_draining()}"
+                    if decision_mode
+                    else f"games={games}/{remaining}"
+                )
                 print(
-                    f"[Ataraxos] round={round_index} games={games}/{remaining} "
-                    f"rate={60.0 * games / elapsed:.1f} games/min",
+                    f"[Ataraxos] round={round_index} {progress} "
+                    f"games={games} rate={60.0 * games / elapsed:.1f} games/min",
                     flush=True,
                 )
             if vector_steps >= args.max_vector_steps:
@@ -799,6 +817,10 @@ def collect_round(
         "draws": summary["draws"],
         "losses": summary["losses"],
         "decisions": summary["steps"],
+        "target_decisions": args.target_decisions,
+        "drain_completed_games": decision_mode,
+        "unresolved_games": env.collection_unresolved_count()[0],
+        "unresolved_decisions": env.collection_unresolved_count()[1],
         "vector_steps": vector_steps,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * collected_games / max(elapsed, 1e-6):.3f}",
@@ -873,7 +895,9 @@ def _collect_child_command(
         "--round",
         str(round_index),
         "--games",
-        str(games),
+        str(games if not args.target_decisions else args.games),
+        "--target-decisions",
+        str(games if args.target_decisions else 0),
         "--lanes",
         str(args.lanes),
         "--workers",
@@ -936,10 +960,10 @@ def collect_sharded_round(
     replay_root = round_dir / "replays"
     existing_files = list((replay_root / args.battle_format).glob("*.json.lz4"))
     existing_games = 0
+    existing_decisions = 0
+    decision_mode = args.target_decisions > 0
     if existing_files:
-        existing_summary = validate_buffer(
-            replay_root, workers=args.validation_workers
-        )
+        existing_summary = validate_buffer(replay_root, workers=args.validation_workers)
         if int(existing_summary["games"]) % 2:
             raise RuntimeError("dual-POV Ataraxos round has an odd replay count")
         if existing_summary["policy_id"] != policy_id:
@@ -947,15 +971,24 @@ def collect_sharded_round(
                 f"round {round_index} already contains a different behavior policy"
             )
         existing_games = int(existing_summary["games"]) // 2
-        if existing_games >= args.games:
+        existing_decisions = int(existing_summary["steps"])
+        if (
+            existing_decisions >= args.target_decisions
+            if decision_mode
+            else existing_games >= args.games
+        ):
             print(
                 f"[Ataraxos] round={round_index} already complete "
-                f"games={existing_games}",
+                f"games={existing_games} decisions={existing_decisions}",
                 flush=True,
             )
             return round_dir, existing_summary, immutable_checkpoint
 
-    remaining = args.games - existing_games
+    remaining = (
+        args.target_decisions - existing_decisions
+        if decision_mode
+        else args.games - existing_games
+    )
     shard_count = min(args.collector_shards, remaining)
     base, extra = divmod(remaining, shard_count)
     quotas = [base + (index < extra) for index in range(shard_count)]
@@ -978,7 +1011,9 @@ def collect_sharded_round(
         shard_output.mkdir(parents=True, exist_ok=True)
         shard_policy_root = shard_output / "behavior_policies"
         if not shard_policy_root.exists():
-            shard_policy_root.symlink_to(output_dir / "behavior_policies", target_is_directory=True)
+            shard_policy_root.symlink_to(
+                output_dir / "behavior_policies", target_is_directory=True
+            )
         log_path = shard_output / "collector.log"
         log_stream = log_path.open("a", encoding="utf-8")
         command = _collect_child_command(
@@ -1005,13 +1040,17 @@ def collect_sharded_round(
         if return_code:
             log_path = shard_output / "collector.log"
             tail = "\n".join(
-                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+                log_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+                    -20:
+                ]
             )
             failures.append(
                 f"shard {shard_index} exited {return_code}; log tail:\n{tail}"
             )
     if failures:
-        raise RuntimeError("parallel Ataraxos collection failed:\n" + "\n".join(failures))
+        raise RuntimeError(
+            "parallel Ataraxos collection failed:\n" + "\n".join(failures)
+        )
 
     replay_format_dir = replay_root / args.battle_format
     replay_format_dir.mkdir(parents=True, exist_ok=True)
@@ -1029,7 +1068,13 @@ def collect_sharded_round(
 
     summary = validate_buffer(replay_root, workers=args.validation_workers)
     physical_games = int(summary["games"]) // 2
-    if physical_games != args.games:
+    if decision_mode:
+        if int(summary["steps"]) < args.target_decisions:
+            raise RuntimeError(
+                f"sharded round produced {summary['steps']} decisions, "
+                f"expected at least {args.target_decisions}"
+            )
+    elif physical_games != args.games:
         raise RuntimeError(
             f"sharded round produced {physical_games} games, expected {args.games}"
         )
@@ -1046,6 +1091,8 @@ def collect_sharded_round(
         "draws": summary["draws"],
         "losses": summary["losses"],
         "decisions": summary["steps"],
+        "target_decisions": args.target_decisions,
+        "drain_completed_games": decision_mode,
         "elapsed_seconds": f"{elapsed:.3f}",
         "games_per_minute": f"{60.0 * new_games / max(elapsed, 1e-6):.3f}",
         "device": args.device,
@@ -1103,7 +1150,9 @@ def _run_update_hook(
         )
     next_checkpoint = Path(next_file.read_text(encoding="utf-8").strip()).resolve()
     if not next_checkpoint.is_file():
-        raise RuntimeError(f"update hook returned missing checkpoint: {next_checkpoint}")
+        raise RuntimeError(
+            f"update hook returned missing checkpoint: {next_checkpoint}"
+        )
     return next_checkpoint
 
 
@@ -1153,7 +1202,9 @@ def main() -> None:
         help="Architecture run below --architecture-save-root (default stage1_b1).",
     )
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--mode", choices=("collect", "pipeline", "inspect"), default="collect")
+    parser.add_argument(
+        "--mode", choices=("collect", "pipeline", "inspect"), default="collect"
+    )
     parser.add_argument("--round", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument(
@@ -1161,6 +1212,13 @@ def main() -> None:
         type=int,
         default=0,
         help="Terminal games per round; zero chooses two games per lane.",
+    )
+    parser.add_argument(
+        "--target-decisions",
+        type=int,
+        default=0,
+        help="Completed-game decisions per round; drain in-flight games at target. "
+        "Zero retains legacy exact completed-game quota.",
     )
     parser.add_argument("--lanes", type=int, default=64)
     parser.add_argument(
@@ -1190,7 +1248,9 @@ def main() -> None:
     parser.add_argument("--turn-limit", type=int, default=200)
     parser.add_argument("--seed", type=int, default=20261027)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--mixed-precision", choices=("no", "bf16", "fp16"), default="bf16")
+    parser.add_argument(
+        "--mixed-precision", choices=("no", "bf16", "fp16"), default="bf16"
+    )
     parser.add_argument("--progress-interval", type=int, default=20)
     parser.add_argument("--max-vector-steps", type=int, default=1_000_000)
     parser.add_argument("--update-command")
@@ -1229,16 +1289,22 @@ def main() -> None:
         # decisions, so two terminal games per lane is the closest simple
         # cadence until live streaming is implemented.
         args.games = 2 * args.lanes * args.collector_shards
-    if min(
-        args.games,
-        args.lanes,
-        args.collector_shards,
-        args.workers,
-        args.rounds,
-        args.evaluation_interval,
-    ) < 1:
+    if (
+        min(
+            args.games,
+            args.lanes,
+            args.collector_shards,
+            args.workers,
+            args.rounds,
+            args.evaluation_interval,
+        )
+        < 1
+    ):
         parser.error("games, lanes, workers and rounds must be positive")
-    if min(args.writer_workers, args.validation_workers) < 0 or args.temperature < 0:
+    if (
+        min(args.writer_workers, args.validation_workers, args.target_decisions) < 0
+        or args.temperature < 0
+    ):
         parser.error(
             "writer-workers, validation-workers and temperature must be non-negative"
         )
